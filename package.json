@@ -1,0 +1,45 @@
+{
+  "name": "topical-mcp",
+  "version": "0.3.0",
+  "description": "A local-first Markdown topic store exposed through MCP.",
+  "type": "module",
+  "bin": {
+    "topical-mcp": "./src/server.js"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^3.25.76"
+  },
+  "license": "MIT",
+  "author": "DanDoDev",
+  "homepage": "https://github.com/DanDoDev/topical#readme",
+  "bugs": {
+    "url": "https://github.com/DanDoDev/topical/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DanDoDev/topical.git"
+  },
+  "keywords": [
+    "mcp",
+    "markdown",
+    "context",
+    "notes",
+    "agents",
+    "local-first"
+  ],
+  "files": [
+    "src",
+    "skills",
+    "docs",
+    "README.md",
+    "LICENSE"
+  ]
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Topical Workflow"
+  short_description: "Find and update shared Markdown topics"
+  default_prompt: "Use $topical-workflow to find and update the appropriate Topical notes."
