@@ -3,4 +3,5 @@ node_modules/
 .npmrc
 .DS_Store
 coverage/
+.topical-cache/
 npm-debug.log*

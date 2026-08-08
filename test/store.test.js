@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -40,9 +40,10 @@ test("searches Markdown content, tags, and topic metadata", async () => {
   await store.createTopicFile({ topic: "authentication", filePath: "research.md", content: "Token rotation needs a seven-day grace period.", description: "Added token rotation research." });
 
   const contentResult = await store.searchTopics({ query: "grace period" });
-  assert.equal(contentResult[0].path, "research.md");
+  assert.equal(contentResult.matchMode, "strict");
+  assert.equal(contentResult.topics[0].files[0].path, "research.md");
   const tagResult = await store.searchTopics({ query: "security" });
-  assert.equal(tagResult[0].topic, "authentication");
+  assert.equal(tagResult.topics[0].topic, "authentication");
 });
 
 test("uses incremental indexes for list and search, and provides bounded topic overviews", async () => {
@@ -65,13 +66,59 @@ test("uses incremental indexes for list and search, and provides bounded topic o
   const found = await store.searchTopics({ query: "lexical index" });
   await store.listTopics();
   const after = await readFile(rootIndexPath, "utf8");
-  assert.equal(found[0].path, "research.md");
+  assert.equal(found.topics[0].files[0].path, "research.md");
   assert.equal(after, before, "ordinary reads must not rebuild or rewrite the root index");
 
   const overview = await store.getTopicOverview({ topic: "performance", maxChars: 500 });
   assert.match(overview.context, /lookup cache/);
   assert.equal(overview.files.length, 2);
   assert.ok(overview.files.every((file) => !Object.hasOwn(file, "terms")));
+});
+
+test("ordinary reads do not mutate root or topic derived state", async () => {
+  const { root, store } = await createStore();
+  await store.createTopic({
+    title: "Read only",
+    summary: "Derived state must stay stable during reads.",
+    tags: [],
+    initialContent: "# Stable state\n\nSearchable read-only evidence.",
+    description: "Created the read-only regression topic."
+  });
+  const rootIndexPath = path.join(root, "index.json");
+  const topicIndexPath = path.join(root, "read-only", "index.json");
+  const before = await Promise.all([readFile(rootIndexPath, "utf8"), readFile(topicIndexPath, "utf8")]);
+
+  await store.readTopicFile({ topic: "read-only" });
+  await store.getTopicOverview({ topic: "read-only" });
+  await store.listTopics();
+  await store.searchTopics({ query: "read-only evidence" });
+
+  const after = await Promise.all([readFile(rootIndexPath, "utf8"), readFile(topicIndexPath, "utf8")]);
+  assert.deepEqual(after, before);
+});
+
+test("missing derived indexes can be rebuilt from Markdown without data loss", async () => {
+  const { root, store } = await createStore();
+  await store.createTopic({
+    title: "Rebuildable cache",
+    summary: "Markdown survives disposable derived state.",
+    tags: [],
+    initialContent: "# Recovery\n\nRebuild search from authoritative Markdown.",
+    description: "Created the rebuild regression topic."
+  });
+  const original = await store.readTopicFile({ topic: "rebuildable-cache" });
+  await unlink(path.join(root, "index.json"));
+  await unlink(path.join(root, "rebuildable-cache", "index.json"));
+
+  const rebuiltStore = new TopicalStore(root);
+  await rebuiltStore.initialize();
+  await rebuiltStore.reindex();
+  const rebuilt = await rebuiltStore.readTopicFile({ topic: "rebuildable-cache" });
+  const results = await rebuiltStore.searchTopics({ query: "authoritative markdown" });
+
+  assert.equal(rebuilt.content, original.content);
+  assert.equal(rebuilt.hash, original.hash);
+  assert.equal(results.topics[0]?.topic, "rebuildable-cache");
 });
 
 test("updates a file with conflict protection and named-section replacement", async () => {

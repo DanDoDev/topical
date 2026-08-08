@@ -10,7 +10,7 @@ npm ci
 npm test
 ```
 
-Node.js 20 or newer is required. Copy `.env.example` to `.env` only for local manual testing; never commit real topic paths, credentials, or private notes.
+Node.js 24 LTS is required. Copy `.env.example` to `.env` only for local manual testing; never commit real topic paths, credentials, or private notes.
 
 ## Pull requests
 
@@ -18,7 +18,7 @@ Node.js 20 or newer is required. Copy `.env.example` to `.env` only for local ma
 2. Explain the user-facing behavior and tradeoffs in the pull request description.
 3. Add or update tests for every behavior change.
 4. Run `npm test` and `npm audit` before submitting.
-5. Update `README.md` and `ROADMAP.md` when a contract or milestone changes.
+5. Update `README.md` when a public contract changes.
 
 Preserve these safety guarantees unless a change is explicitly designed, documented, and tested:
 

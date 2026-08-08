@@ -38,7 +38,7 @@ function tool(handler) {
 }
 
 const optionalTags = z.array(z.string().min(1)).max(50).optional();
-const topicId = z.string().min(1).describe("Topical topic ID such as scripts-all. It is a folder under TOPICAL_ROOT, not a Codex task, chat, workspace, or project. Search or list topics first if uncertain.");
+const topicId = z.string().min(1).describe("Topical topic ID such as garden-lighting. It is a folder under TOPICAL_ROOT, not a Codex task, chat, workspace, or project. Search or list topics first if uncertain.");
 const optionalTopicId = topicId.optional();
 const topicTitle = z.string().min(1).max(160).describe("Human title for a new Topical note folder. Topical derives a lowercase topic ID from this title.");
 const topicFilePath = z.string().min(1).describe("Safe relative Markdown path inside the selected Topical topic, such as research.md or prs/123.md.");
@@ -69,24 +69,25 @@ function parsePublicationRoots(value = "") {
 }
 
 async function main() {
+  const nodeMajor = Number(process.versions.node.split(".")[0]);
+  if (nodeMajor !== 24) throw new Error(`Topical v0.4 requires Node.js 24 LTS; found ${process.version}.`);
   await loadDotEnv();
   const root = process.env.TOPICAL_ROOT;
   if (!root) throw new Error("TOPICAL_ROOT is required. Set it in MCP configuration or a local .env file.");
 
   const store = new TopicalStore(root);
   await store.initialize();
-  await store.reindex();
   const publications = new PublicationStore({
     topicalRoot: root,
     publicationRoots: parsePublicationRoots(process.env.TOPICAL_PUBLISH_ROOTS),
     topicStore: store
   });
   await publications.initialize();
-  const server = new McpServer({ name: "topical", version: "0.3.0" }, { instructions: SERVER_INSTRUCTIONS });
+  const server = new McpServer({ name: "topical", version: "0.4.0" }, { instructions: SERVER_INSTRUCTIONS });
 
   server.registerTool("search_topics", {
     title: "Search topics",
-    description: "Search Topical note folders by title, summary, tags, and Markdown. Use first to find the explicit topic for a write; topics are not Codex chats or projects.",
+    description: "Search Topical note folders with topic-grouped strict matching and an explicitly marked relaxed fallback. Use first to find the explicit topic for a write; topics are not Codex chats or projects.",
     inputSchema: { query: z.string().default(""), tags: optionalTags, limit: z.number().int().min(1).max(50).optional() },
     annotations: { readOnlyHint: true }
   }, tool((input) => store.searchTopics(input)));

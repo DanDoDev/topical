@@ -84,7 +84,8 @@ test("MCP server registers and calls Topical tools over stdio", async (t) => {
 
   const searched = await client.callTool({ name: "search_topics", arguments: { query: "protocol test evidence" } });
   const searchedBody = JSON.parse(searched.content[0].text);
-  assert.equal(searchedBody[0].path, "checks/live.md");
+  assert.equal(searchedBody.matchMode, "strict");
+  assert.equal(searchedBody.topics[0].files[0].path, "checks/live.md");
 
   const published = await client.callTool({
     name: "publish_document",

@@ -3,9 +3,9 @@
 [![CI](https://github.com/DanDoDev/topical/actions/workflows/ci.yml/badge.svg)](https://github.com/DanDoDev/topical/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Topical is a local-first, Markdown-based context store for agents and people. Every topic is a folder whose `context.md` is the source of truth. `index.json` files are maintained metadata and audit logs that can be rebuilt after manual edits.
+Topical is a local-first, Markdown-based context store for agents and people. Every topic is a folder whose `context.md` is the source of truth. `index.json` files are maintained catalogue metadata and audit logs that can be rebuilt after manual edits.
 
-Search indexes are derived data. The server builds them once at startup (or when `reindex_topical` is called), then updates only the affected topic after each mutation. Normal list and search calls do not rebuild or rewrite indexes.
+Search uses a disposable SQLite FTS5 cache at `$TOPICAL_ROOT/.topical-cache/search.sqlite`. The server rebuilds it from Markdown when it is missing, corrupt, or incompatible, then transactionally replaces only the affected topic after each mutation. Normal list, read, overview, and search calls do not rewrite JSON indexes or the search cache.
 
 Topical is currently pre-1.0. Back up important topic folders before upgrading across versions while the storage and tool contracts are still evolving.
 
@@ -21,7 +21,7 @@ cp .env.example .env
 # Optionally configure named publication roots
 ```
 
-The included `.nvmrc` pins development to Node.js 20.19.0.
+The included `.nvmrc` pins development to Node.js 24 LTS. Topical uses the native `better-sqlite3` binding; major platforms and architectures normally receive prebuilt binaries, while other environments may require a local compiler toolchain.
 
 Add this server to your MCP configuration:
 
@@ -79,7 +79,7 @@ topical-files/
 
 ## Tools
 
-- `search_topics` searches titles, tags, and all Markdown content.
+- `search_topics` returns topic-grouped results. It first requires all meaningful query terms across a topic's metadata and files; only when that strict pass is empty does it return a clearly marked relaxed fallback.
 - `list_topics` lists topics by recent activity, title, or creation time.
 - `create_topic`, `read_topic_file`, and `update_topic_file` manage core context.
 - `get_topic_overview` returns a bounded briefing, file inventory, and recent history before an agent reads detailed notes.
@@ -95,7 +95,7 @@ All mutation tools require a one-sentence `description`. It is recorded in the r
 
 | Tool | Important inputs | Result |
 | --- | --- | --- |
-| `search_topics` | `query`, optional `tags`, `limit` | Matching topic files with snippets and relevance scores. |
+| `search_topics` | `query`, optional exact `tags`, `limit` | `{ query, matchMode, topics }`, with each topic returned once and bounded file hits, clean snippets, matched terms, and matched fields. |
 | `list_topics` | optional `sort`, `tags` | Topic summaries, metadata, file count, and latest action. |
 | `create_topic` | `title`, `summary`, `tags`, `initialContent`, `description` | Topic ID and `context.md` path. |
 | `read_topic_file` | `topic`, optional `filePath` | Markdown content and a SHA-256 `hash`. |
@@ -122,7 +122,9 @@ For efficient model context, use this sequence:
 2. `get_topic_overview` to understand the topic and select the small number of relevant files.
 3. `read_topic_file` only for those files, then make a focused update.
 
-`search_topics` ranks exact title, tag, heading, path, and body-term matches. It reads only a bounded set of candidate Markdown files to produce final snippets; it does not scan every file on every query.
+`search_topics` ranks title, summary, tag, heading, path, and body matches through SQLite FTS5. English and French text use accent-insensitive `unicode61` tokenization without English-only stemming. FTS5 stores postings rather than a second copy of Markdown; Topical reads only the best candidate files to produce final snippets, and YAML frontmatter is never used as snippet text.
+
+An empty query behaves like a bounded topic listing. A non-empty query reports `matchMode: "strict"` when every meaningful term matched somewhere in the topic. If no strict topic exists, Topical retries with coverage-ranked matching and reports `matchMode: "relaxed"`; widening is never silent.
 
 ### Example topic
 
@@ -152,6 +154,7 @@ updated_at: 2026-07-18T14:00:00.000Z
 - Markdown writes are capped at 5 MiB per file.
 - Writes use temporary files followed by rename; index data is rebuildable.
 - Updates can include `expectedHash`, preventing an agent from overwriting content it read before somebody else changed it.
+- The SQLite search database is derived state inside a protected real directory. Cache symlinks are rejected, rebuilds are integrity-checked before replacement, and loss of the cache never requires a Markdown migration.
 
 ## Contributing and security
 

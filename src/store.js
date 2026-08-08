@@ -3,12 +3,13 @@ import { lstat, mkdir, readFile, readdir, realpath, rename, stat, writeFile } fr
 import os from "node:os";
 import path from "node:path";
 
-const ROOT_INDEX_VERSION = 2;
-const TOPIC_INDEX_VERSION = 3;
+import { queryWithRelaxedFallback } from "./search-index.js";
+import { SqliteSearchIndex } from "./sqlite-search-index.js";
+
+const ROOT_INDEX_VERSION = 3;
+const TOPIC_INDEX_VERSION = 4;
 const MAX_RECENT_ACTIONS = 100;
 const MAX_MARKDOWN_BYTES = 5 * 1024 * 1024;
-const MAX_INDEX_TERMS = 5_000;
-const MAX_SEARCH_CANDIDATES = 60;
 const DEFAULT_OVERVIEW_CHARS = 6_000;
 
 export class TopicalError extends Error {}
@@ -171,12 +172,38 @@ function normalizeText(value) {
   return String(value).normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 }
 
-function tokenize(value) {
-  return normalizeText(value).match(/[\p{L}\p{N}][\p{L}\p{N}_-]*/gu) || [];
-}
-
 function compactText(value) {
   return value.replace(/\s+/g, " ").trim();
+}
+
+function bodySnippet(body, matchedTerms, query) {
+  const source = compactText(body);
+  if (!source) return "";
+  const normalized = normalizeText(source);
+  const phrase = normalizeText(query || "").trim();
+  const positions = [phrase, ...(matchedTerms || [])]
+    .filter(Boolean)
+    .map((term) => normalized.indexOf(term))
+    .filter((position) => position >= 0);
+  const firstMatch = positions.length ? Math.min(...positions) : 0;
+  const start = Math.max(0, firstMatch - 110);
+  return source.slice(start, start + 320);
+}
+
+function explainFileMatch(filePath, body, terms) {
+  const normalizedPath = normalizeText(filePath);
+  const normalizedHeadings = headingList(body).map(normalizeText);
+  const normalizedBody = normalizeText(body);
+  const matchedTerms = [];
+  const matchedFields = new Set();
+  for (const term of terms || []) {
+    let matched = false;
+    if (normalizedPath.includes(term)) { matched = true; matchedFields.add("path"); }
+    if (normalizedHeadings.some((heading) => heading.includes(term))) { matched = true; matchedFields.add("headings"); }
+    if (normalizedBody.includes(term)) { matched = true; matchedFields.add("body"); }
+    if (matched) matchedTerms.push(term);
+  }
+  return { matchedTerms, matchedFields: [...matchedFields] };
 }
 
 function headingList(markdown) {
@@ -189,6 +216,9 @@ function headingList(markdown) {
 export class TopicalStore {
   #queue = Promise.resolve();
   #rootIndexCache;
+  #searchIndex;
+  #initialized = false;
+  #initializePromise;
 
   constructor(root) {
     if (!path.isAbsolute(root)) throw new TopicalError("TOPICAL_ROOT must be an absolute path.");
@@ -196,6 +226,17 @@ export class TopicalStore {
   }
 
   async initialize() {
+    if (this.#initialized) return;
+    if (this.#initializePromise) return this.#initializePromise;
+    this.#initializePromise = this.#initialize();
+    try {
+      await this.#initializePromise;
+    } finally {
+      this.#initializePromise = null;
+    }
+  }
+
+  async #initialize() {
     if (this.root === path.parse(this.root).root || this.root === os.homedir()) {
       throw new TopicalError("TOPICAL_ROOT must be a dedicated directory, not the filesystem or home root.");
     }
@@ -207,11 +248,42 @@ export class TopicalStore {
     this.root = await realpath(this.root);
     const indexPath = path.join(this.root, "index.json");
     await assertSafeFilesystemPath(this.root, indexPath);
+    let rootNeedsRebuild = false;
     if (!await exists(indexPath)) {
       const emptyIndex = { version: ROOT_INDEX_VERSION, updatedAt: now(), topics: [], documents: [], recentActions: [] };
       await writeAtomic(this.root, indexPath, JSON.stringify(emptyIndex, null, 2) + "\n");
       this.#rootIndexCache = emptyIndex;
+      rootNeedsRebuild = true;
+    } else {
+      const existingIndex = await readJson(indexPath, null);
+      rootNeedsRebuild = !existingIndex || existingIndex.version !== ROOT_INDEX_VERSION;
+      if (!rootNeedsRebuild) {
+        this.#rootIndexCache = existingIndex;
+        for (const topic of existingIndex.topics || []) {
+          if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(topic.id)) { rootNeedsRebuild = true; break; }
+          const topicIndexPath = path.join(this.root, topic.id, "index.json");
+          await assertSafeFilesystemPath(this.root, topicIndexPath);
+          const topicIndex = await readJson(topicIndexPath, null);
+          if (!topicIndex || topicIndex.version !== TOPIC_INDEX_VERSION) { rootNeedsRebuild = true; break; }
+        }
+      }
     }
+    this.#searchIndex = new SqliteSearchIndex(this.root);
+    const searchHealth = await this.#searchIndex.health();
+    this.#initialized = true;
+    try {
+      if (rootNeedsRebuild || searchHealth.status !== "ready") await this.#reindexUnlocked();
+    } catch (error) {
+      this.#initialized = false;
+      await this.#searchIndex.close();
+      throw error;
+    }
+  }
+
+  async close() {
+    await this.#searchIndex?.close();
+    this.#initialized = false;
+    this.#rootIndexCache = undefined;
   }
 
   async #serial(operation) {
@@ -281,16 +353,14 @@ export class TopicalStore {
       const parsed = parseFrontmatter(content, metadata);
       const body = compactText(parsed.body);
       const headings = headingList(parsed.body);
-      const terms = [...new Set(tokenize(`${metadata.title || topic}\n${metadata.summary || ""}\n${(metadata.tags || []).join(" ")}\n${filePath}\n${headings.join(" ")}\n${body}`))]
-        .slice(0, MAX_INDEX_TERMS);
       documents.push({
         topic,
         path: filePath,
         headings,
         excerpt: body.slice(0, 360),
-        terms,
         size: Buffer.byteLength(content, "utf8"),
-        hash: hash(content)
+        hash: hash(content),
+        body
       });
     }
     return documents;
@@ -358,9 +428,16 @@ export class TopicalStore {
     const context = await readFile(contextPath, "utf8");
     const metadata = parseFrontmatter(context, { title: topic, summary: "", tags: [] }).metadata;
     index.topic = { id: topic, ...metadata };
-    index.documents = await this.#buildTopicDocuments(topic, directory, index.files, metadata);
+    const searchDocuments = await this.#buildTopicDocuments(topic, directory, index.files, metadata);
+    index.documents = searchDocuments.map(({ body: _body, ...document }) => document);
     await writeAtomic(this.root, path.join(directory, "index.json"), JSON.stringify(index, null, 2) + "\n");
-    return event;
+    return {
+      event,
+      searchTopic: {
+        topic: this.#topicSummary(topic, metadata, index),
+        documents: searchDocuments
+      }
+    };
   }
 
   async #reindexUnlocked(rootAction) {
@@ -371,6 +448,7 @@ export class TopicalStore {
     const entries = await readdir(this.root, { withFileTypes: true });
     const topics = [];
     const documents = [];
+    const searchTopics = [];
     const events = rootAction ? [rootAction] : [];
     for (const entry of entries) {
       if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
@@ -389,12 +467,15 @@ export class TopicalStore {
       index.files = files;
       index.updatedAt = parsed.metadata.updatedAt || index.updatedAt || now();
       index.history = index.history || [];
-      index.documents = await this.#buildTopicDocuments(topic, directory, files, parsed.metadata);
+      const searchDocuments = await this.#buildTopicDocuments(topic, directory, files, parsed.metadata);
+      index.documents = searchDocuments.map(({ body: _body, ...document }) => document);
       await writeAtomic(this.root, path.join(directory, "index.json"), JSON.stringify(index, null, 2) + "\n");
       const lastAction = index.history.at(-1);
       if (lastAction) events.push({ topic, ...lastAction });
       documents.push(...index.documents);
-      topics.push(this.#topicSummary(topic, parsed.metadata, index));
+      const topicSummary = this.#topicSummary(topic, parsed.metadata, index);
+      topics.push(topicSummary);
+      searchTopics.push({ topic: topicSummary, documents: searchDocuments });
     }
     const actions = [...events, ...(current.recentActions || [])]
       .filter((event, index, all) => all.findIndex((candidate) => `${candidate.topic || ""}|${candidate.at}|${candidate.action}|${candidate.path || ""}` === `${event.topic || ""}|${event.at}|${event.action}|${event.path || ""}`) === index)
@@ -402,13 +483,30 @@ export class TopicalStore {
       .slice(0, MAX_RECENT_ACTIONS);
     topics.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     const rootIndex = { version: ROOT_INDEX_VERSION, updatedAt: now(), topics, documents, recentActions: actions };
+    await this.#searchIndex.rebuild({ topics: searchTopics });
     return this.#writeRootIndex(rootIndex);
+  }
+
+  async #replaceSearchTopic(searchTopic) {
+    try {
+      await this.#searchIndex.replace(searchTopic);
+    } catch {
+      await this.#reindexUnlocked();
+    }
+  }
+
+  async #removeSearchTopic(topic) {
+    try {
+      await this.#searchIndex.remove({ topic });
+    } catch {
+      await this.#reindexUnlocked();
+    }
   }
 
   async recordPublicationAction(topic, publication, description) {
     return this.#serial(async () => {
       assertDescription(description);
-      const event = await this.#record(topic, publication.action, null, description);
+      const { event, searchTopic } = await this.#record(topic, publication.action, null, description);
       const directory = await this.#requireTopicDirectory(topic);
       const index = await this.#topicIndex(topic);
       const summary = {
@@ -421,6 +519,7 @@ export class TopicalStore {
       index.publications = [...(index.publications || []).filter((entry) => entry.id !== publication.id), summary];
       await writeAtomic(this.root, path.join(directory, "index.json"), JSON.stringify(index, null, 2) + "\n");
       await this.#upsertTopicInRoot(topic);
+      await this.#replaceSearchTopic(searchTopic);
       return event;
     });
   }
@@ -453,8 +552,9 @@ export class TopicalStore {
       await assertSafeFilesystemPath(this.root, directory);
       await writeAtomic(this.root, path.join(directory, "context.md"), formatContext({ title: title.trim(), summary: summary.trim(), tags: cleanTags, createdAt: timestamp, updatedAt: timestamp }, initialContent));
       await writeAtomic(this.root, path.join(directory, "index.json"), JSON.stringify({ version: TOPIC_INDEX_VERSION, topic: { id: topic, title: title.trim(), summary: summary.trim(), tags: cleanTags, createdAt: timestamp, updatedAt: timestamp }, files: ["context.md"], history: [] }, null, 2) + "\n");
-      await this.#record(topic, "create_topic", "context.md", description);
+      const { searchTopic } = await this.#record(topic, "create_topic", "context.md", description);
       await this.#upsertTopicInRoot(topic);
+      await this.#replaceSearchTopic(searchTopic);
       return { topic, path: path.join(directory, "context.md") };
     });
   }
@@ -488,8 +588,9 @@ export class TopicalStore {
       const directory = await this.#requireTopicDirectory(topic);
       await writeAtomic(this.root, path.join(directory, current.path), next);
       if (current.path === "context.md") await this.#touchContext(topic, next);
-      await this.#record(topic, "update_file", current.path, description);
+      const { searchTopic } = await this.#record(topic, "update_file", current.path, description);
       await this.#upsertTopicInRoot(topic);
+      await this.#replaceSearchTopic(searchTopic);
       const updated = await this.readTopicFile({ topic, filePath: current.path });
       return { topic, path: current.path, hash: updated.hash };
     });
@@ -513,8 +614,9 @@ export class TopicalStore {
       await assertSafeFilesystemPath(this.root, target);
       if (await exists(target)) throw new TopicalError(`File '${normalized}' already exists.`);
       await writeAtomic(this.root, target, content);
-      await this.#record(topic, "create_file", normalized, description);
+      const { searchTopic } = await this.#record(topic, "create_file", normalized, description);
       await this.#upsertTopicInRoot(topic);
+      await this.#replaceSearchTopic(searchTopic);
       return { topic, path: normalized, hash: hash(content) };
     });
   }
@@ -533,8 +635,9 @@ export class TopicalStore {
       await mkdir(path.dirname(trashTarget), { recursive: true });
       await assertSafeFilesystemPath(this.root, trashTarget);
       await rename(target, trashTarget);
-      await this.#record(topic, "delete_file", normalized, description);
+      const { searchTopic } = await this.#record(topic, "delete_file", normalized, description);
       await this.#upsertTopicInRoot(topic);
+      await this.#replaceSearchTopic(searchTopic);
       return { topic, path: normalized, trashedTo: trashTarget };
     });
   }
@@ -553,8 +656,9 @@ export class TopicalStore {
       };
       const directory = await this.#requireTopicDirectory(topic);
       await writeAtomic(this.root, path.join(directory, "context.md"), formatContext(metadata, parsed.body));
-      await this.#record(topic, "update_metadata", "context.md", description);
+      const { searchTopic } = await this.#record(topic, "update_metadata", "context.md", description);
       await this.#upsertTopicInRoot(topic);
+      await this.#replaceSearchTopic(searchTopic);
       return { topic, metadata };
     });
   }
@@ -570,6 +674,7 @@ export class TopicalStore {
       await assertSafeFilesystemPath(this.root, target);
       await rename(directory, target);
       await this.#removeTopicFromRoot(topic, { at: now(), action: "delete_topic", path: null, description: description.trim() });
+      await this.#removeSearchTopic(topic);
       return { topic, trashedTo: target };
     });
   }
@@ -591,68 +696,35 @@ export class TopicalStore {
       metadata: { ...summary, tags: [...summary.tags] },
       context: compactText(parsed.body).slice(0, boundedLength),
       contextTruncated: compactText(parsed.body).length > boundedLength,
-      files: (index.documents || []).map(({ terms, ...document }) => document),
+      files: (index.documents || []).map((document) => ({ ...document, headings: [...(document.headings || [])] })),
       publications: [...(index.publications || [])],
       recentHistory: [...(index.history || [])].slice(-12).reverse()
     };
   }
 
   async searchTopics({ query, tags = [], limit = 10 }) {
-    const rootIndex = await this.#getRootIndex();
-    const needle = normalizeText(String(query || "").trim());
-    const queryTerms = [...new Set(tokenize(needle))];
-    const wantedTags = tags.map((tag) => normalizeText(tag));
-    const allowedTopics = new Map(rootIndex.topics
-      .filter((topic) => wantedTags.every((tag) => topic.tags.some((value) => normalizeText(value) === tag)))
-      .map((topic) => [topic.id, topic]));
-    const metadataCandidates = rootIndex.documents
-      .filter((document) => allowedTopics.has(document.topic))
-      .map((document) => {
-        const topic = allowedTopics.get(document.topic);
-        const terms = new Set(document.terms || []);
-        const matchedTerms = queryTerms.filter((term) => terms.has(term));
-        if (queryTerms.length && !matchedTerms.length) return null;
-        const headings = (document.headings || []).map(normalizeText);
-        let score = document.path === "context.md" ? 5 : 0;
-        score += matchedTerms.length * 3;
-        if (needle && normalizeText(topic.title).includes(needle)) score += 30;
-        if (needle && topic.tags.some((tag) => normalizeText(tag).includes(needle))) score += 15;
-        if (needle && headings.some((heading) => heading.includes(needle))) score += 12;
-        if (needle && normalizeText(document.path).includes(needle)) score += 8;
-        return { document, topic, score };
-      })
-      .filter(Boolean)
-      .sort((a, b) => b.score - a.score || b.topic.updatedAt.localeCompare(a.topic.updatedAt));
-
-    // A rare query may fall outside a capped document-term list. Fall back to a full scan only then,
-    // preserving search recall while normal searches touch a bounded set of candidate files.
-    const candidates = (metadataCandidates.length ? metadataCandidates : rootIndex.documents
-      .filter((document) => allowedTopics.has(document.topic))
-      .map((document) => ({ document, topic: allowedTopics.get(document.topic), score: document.path === "context.md" ? 5 : 0 })))
-      .slice(0, MAX_SEARCH_CANDIDATES);
-    const results = [];
-    for (const { document, topic, score: metadataScore } of candidates) {
-      const directory = await this.#requireTopicDirectory(document.topic);
-      const target = path.join(directory, document.path);
-      await assertSafeFilesystemPath(this.root, target);
-      if (!await exists(target)) continue;
-      const content = await readFile(target, "utf8");
-      const snippetSource = compactText(content);
-      const normalizedContent = normalizeText(snippetSource);
-      const phrasePosition = needle ? normalizedContent.indexOf(needle) : 0;
-      const matchedTerms = queryTerms.filter((term) => normalizedContent.includes(term));
-      if (queryTerms.length && !matchedTerms.length) continue;
-      const firstMatch = phrasePosition >= 0 ? phrasePosition : Math.min(...matchedTerms.map((term) => normalizedContent.indexOf(term)).filter((position) => position >= 0));
-      const start = Math.max(0, firstMatch - 110);
-      results.push({
-        topic: document.topic,
-        title: topic.title,
-        path: document.path,
-        score: metadataScore + matchedTerms.length * 2 + (phrasePosition >= 0 ? 25 : 0),
-        snippet: snippetSource.slice(start, start + 320),
-        hash: document.hash
-      });
+    await this.initialize();
+    const sourceQuery = String(query || "").trim();
+    const result = await queryWithRelaxedFallback(this.#searchIndex, { query: sourceQuery, tags, limit });
+    const topics = [];
+    for (const topic of result.topics) {
+      const directory = await this.#requireTopicDirectory(topic.topic);
+      const files = [];
+      for (const file of topic.files || []) {
+        const target = path.join(directory, file.path);
+        await assertSafeFilesystemPath(this.root, target);
+        if (!await exists(target)) continue;
+        const content = await readFile(target, "utf8");
+        const parsed = parseFrontmatter(content);
+        const explanation = explainFileMatch(file.path, parsed.body, topic.matchedTerms);
+        files.push({
+          ...file,
+          ...explanation,
+          snippet: bodySnippet(parsed.body, explanation.matchedTerms.length ? explanation.matchedTerms : topic.matchedTerms, sourceQuery)
+        });
+      }
+      topics.push({ ...topic, files });
     }
-    return results.sort((a, b) => b.score - a.score || a.topic.localeCompare(b.topic)).slice(0, Math.max(1, Math.min(Number(limit) || 10, 50)));
+    return { query: sourceQuery, matchMode: result.matchMode, topics };
   }
 }
