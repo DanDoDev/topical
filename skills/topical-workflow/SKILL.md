@@ -25,6 +25,18 @@ When the user says to start or create a topical, interpret that as a request to 
 
 Do not ask for a filesystem path merely to locate existing Topical notes. If Topical MCP tools are unavailable, say that clearly and then request an alternative.
 
+## Recover an unavailable MCP
+
+If Topical is enabled but its tools are missing or the connection closes during startup:
+
+1. Inspect the MCP startup stderr. Adding the topic directory as a workspace root does not configure or change the MCP runtime.
+2. Run the configured executable and server path with `--doctor --json`, forwarding the same `TOPICAL_ROOT` environment.
+3. Topical v0.4 requires Node 24.x. Do not rely on a desktop or IDE host resolving `node` through an interactive NVM shell; configure the absolute executable returned by `nvm which 24`.
+4. If dependencies or `better-sqlite3` fail to load, activate Node 24 and run `npm ci` in the Topical checkout.
+5. Restart the MCP host after correcting its configuration, then retry `search_topics` or `list_topics`.
+
+Read-only terminal diagnostics are allowed for recovery. Do not edit the Topical topic store directly to bypass an unavailable MCP.
+
 ## Publications
 
 Treat publications as explicit independent Markdown checkpoints. Read the topic sources and publication status before drafting. `guidance` is advisory only; only `publish_document` or `update_publication` can change a destination document.

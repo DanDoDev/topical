@@ -14,14 +14,24 @@ Topical is currently pre-1.0. Back up important topic folders before upgrading a
 ```bash
 git clone https://github.com/DanDoDev/topical.git
 cd topical
+nvm install
 nvm use
+node --version
 npm ci
 cp .env.example .env
 # Edit TOPICAL_ROOT in .env
 # Optionally configure named publication roots
 ```
 
-The included `.nvmrc` pins development to Node.js 24 LTS. Topical uses the native `better-sqlite3` binding; major platforms and architectures normally receive prebuilt binaries, while other environments may require a local compiler toolchain.
+The included `.nvmrc` pins development to Node.js 24 LTS. `node --version` must report `v24.x`. Topical uses the native `better-sqlite3` binding; major platforms and architectures normally receive prebuilt binaries, while other environments may require a local compiler toolchain. Run `npm ci` again whenever you switch Node versions so native dependencies match the runtime.
+
+Get the absolute Node 24 executable for your MCP configuration:
+
+```bash
+nvm which 24
+```
+
+Use that returned path rather than `node`. Desktop and IDE MCP hosts may not inherit the NVM selection from an interactive terminal.
 
 Add this server to your MCP configuration:
 
@@ -29,7 +39,7 @@ Add this server to your MCP configuration:
 {
   "mcpServers": {
     "topical": {
-      "command": "node",
+      "command": "/absolute/path/from-nvm-which-24",
       "args": ["/absolute/path/to/topical/src/server.js"],
       "env": {
         "TOPICAL_ROOT": "/absolute/path/to/topical-files"
@@ -40,6 +50,49 @@ Add this server to your MCP configuration:
 ```
 
 `TOPICAL_ROOT` supplied by MCP configuration takes precedence over `.env`. The server creates the root directory and its `index.json` on first use.
+
+## Diagnose startup problems
+
+Run Topical's read-only doctor with the same executable and environment configured in the MCP host:
+
+```bash
+TOPICAL_ROOT=/absolute/path/to/topical-files /absolute/path/to/node-24 /absolute/path/to/topical/src/server.js --doctor
+```
+
+Add `--json` for machine-readable output. The doctor checks the runtime, MCP dependency, native SQLite binding, FTS5 capability, configured root, search cache, and publication-root syntax. It does not create directories, rebuild indexes, or modify Markdown or derived state.
+
+When Node 24 is active and `.env` contains `TOPICAL_ROOT`, `npm run doctor` is the local shortcut.
+
+If an MCP host reports that Topical exited, closed its connection, or exposed no tools:
+
+1. Run `node --version`; Topical v0.4 requires Node 24.x.
+2. Run `nvm install`, `nvm use`, and `npm ci` in the Topical checkout.
+3. Run `nvm which 24` and place that absolute executable in the MCP server's `command` setting. Do not rely on the host resolving `node` through your interactive shell.
+4. Confirm `TOPICAL_ROOT` is set in the MCP server environment to an absolute, dedicated directory. Adding the directory as a workspace root does not configure the MCP process.
+5. Run the configured command manually with `--doctor`, then restart the desktop app, CLI session, or IDE extension so it reloads the MCP configuration.
+
+Common startup errors:
+
+| Error | Recovery |
+| --- | --- |
+| Node 20/22 or `Node.js 24.x is required` | Point the MCP `command` at the absolute result of `nvm which 24`, then restart the host. |
+| `NODE_MODULE_VERSION`, `ERR_DLOPEN_FAILED`, or a `better-sqlite3` load failure | Activate Node 24 and run `npm ci` again. |
+| `ERR_MODULE_NOT_FOUND` | Run `npm ci` in the Topical checkout under Node 24. |
+| `TOPICAL_ROOT is required` | Set `TOPICAL_ROOT` in the MCP server's environment; a workspace folder is unrelated. |
+| FTS5 unavailable | Reinstall with `npm ci` under Node 24 and confirm the doctor sees the supported `better-sqlite3` build. |
+
+For Codex, local STDIO MCP servers are configured in `~/.codex/config.toml` or a trusted project's `.codex/config.toml`. The `command`, `args`, `env`, and optional `cwd` fields control the actual process Codex launches:
+
+```toml
+[mcp_servers.topical]
+command = "/absolute/path/from-nvm-which-24"
+args = ["/absolute/path/to/topical/src/server.js"]
+
+[mcp_servers.topical.env]
+TOPICAL_ROOT = "/absolute/path/to/topical-files"
+```
+
+After saving, restart the MCP host. See the [official Codex MCP configuration documentation](https://developers.openai.com/codex/mcp/).
 
 ## Choosing a topic
 

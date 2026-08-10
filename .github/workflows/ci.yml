@@ -8,6 +8,28 @@ permissions:
   contents: read
 
 jobs:
+  startup-guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up unsupported Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Verify the launcher explains how to select Node 24
+        shell: bash
+        run: |
+          set +e
+          output="$(node src/server.js --doctor 2>&1)"
+          status=$?
+          set -e
+          test "$status" -ne 0
+          echo "$output"
+          grep -F "Node.js 24.x is required" <<< "$output"
+          grep -F "nvm which 24" <<< "$output"
+
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 10
