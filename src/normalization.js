@@ -40,6 +40,13 @@ export function normalizeSearchText(value) {
 
 export function normalizedSearchView(value) {
   const source = String(value);
+  const normalizedText = normalizeSearchText(source);
+  if (normalizedText.length === source.length && !/[\ud800-\udfff]/u.test(source)) {
+    return {
+      text: normalizedText,
+      sourceOffsets: Array.from({ length: source.length + 1 }, (_, index) => index)
+    };
+  }
   let text = "";
   const sourceOffsets = [];
   let sourceOffset = 0;
@@ -197,17 +204,25 @@ export function queryAnalysisResponse(analysis) {
 
 export function technicalAliasEntries(value, { limit = 200 } = {}) {
   const source = String(value || "");
-  const tokens = source.match(/[A-Za-z][A-Za-z0-9]*(?:[._/-][A-Za-z0-9]+)+|[a-z0-9]+(?:[A-Z][A-Za-z0-9]*)+/g) || [];
+  const tokens = source.match(/[A-Za-z][A-Za-z0-9]*(?:[._/-][A-Za-z0-9]+)+|[A-Za-z][a-z0-9]+(?:[A-Z][A-Za-z0-9]*)+|[A-Z]{2,}(?:[A-Z][a-z]+)+[A-Za-z0-9]*/g) || [];
   const entries = [];
   const seen = new Set();
   for (const token of tokens) {
+    const camelCase = /[a-z0-9][A-Z]/.test(token) || /[A-Z]{2,}[A-Z][a-z]/.test(token);
+    const separators = token.match(/[._/-]/g) || [];
+    if (!camelCase && !separators.length) continue;
     const separated = token
       .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
       .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
       .replace(/[._/-]+/g, " ");
     const parts = (separated.match(/[A-Za-z0-9]+/g) || []).map(normalizeSearchText).filter(Boolean);
     if (parts.length < 2) continue;
-    for (const alias of [parts.join(" "), parts.join("")]) {
+    const aliases = [];
+    if (camelCase) aliases.push(parts.join(" "));
+    if (separators.length === 1 && parts.every((part) => /^[a-z]+$/.test(part)) && parts.join("").length <= 32) {
+      aliases.push(parts.join(""));
+    }
+    for (const alias of aliases) {
       const key = `${token}\u0000${alias}`;
       if (!alias || seen.has(key)) continue;
       seen.add(key);

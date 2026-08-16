@@ -32,8 +32,11 @@ test("query analysis reports duplicate and capped terms instead of silently disc
 });
 
 test("technical aliases separate camel case and join punctuated identifiers", () => {
-  const aliases = technicalAliasEntries("expectedHash runs on Node.js with snake_case");
+  const aliases = technicalAliasEntries("expectedHash ExpectedHash HTTPServer runs on Node.js with snake_case");
   assert.ok(aliases.some((entry) => entry.source === "expectedHash" && entry.alias === "expected hash"));
+  assert.ok(aliases.some((entry) => entry.source === "ExpectedHash" && entry.alias === "expected hash"));
+  assert.ok(aliases.some((entry) => entry.source === "HTTPServer" && entry.alias === "http server"));
   assert.ok(aliases.some((entry) => entry.source === "Node.js" && entry.alias === "nodejs"));
-  assert.ok(aliases.some((entry) => entry.source === "snake_case" && entry.alias === "snake case"));
+  assert.equal(technicalAliasEntries("document-001.md").length, 0);
+  assert.ok(aliases.some((entry) => entry.source === "snake_case" && entry.alias === "snakecase"));
 });

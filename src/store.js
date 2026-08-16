@@ -208,20 +208,21 @@ function bodySnippet(body, matchedTerms, query) {
   return Array.from(source).slice(start, start + 320).join("");
 }
 
-function explainFileMatch(filePath, body, terms) {
+function explainFileMatch(filePath, body, terms, aliasTerms = []) {
   const normalizedPath = normalizeSearchText(filePath);
   const normalizedHeadings = headingList(body).map(normalizeSearchText);
   const normalizedBody = normalizeSearchText(body);
   const matchedTerms = [];
   const matchedFields = new Set();
   const matchedAliases = [];
-  const aliases = technicalAliasEntries([filePath, body].join("\n"));
+  const aliasTermSet = new Set(aliasTerms);
+  const aliases = aliasTermSet.size ? technicalAliasEntries([filePath, body].join("\n")) : [];
   for (const term of terms || []) {
     let matched = false;
     if (normalizedPath.includes(term)) { matched = true; matchedFields.add("path"); }
     if (normalizedHeadings.some((heading) => heading.includes(term))) { matched = true; matchedFields.add("headings"); }
     if (normalizedBody.includes(term)) { matched = true; matchedFields.add("body"); }
-    for (const alias of aliases) {
+    for (const alias of aliasTermSet.has(term) ? aliases : []) {
       const aliasTerms = alias.alias.match(/[\p{L}\p{N}]+/gu) || [];
       if (alias.alias === term || aliasTerms.includes(term)) {
         matched = true;
@@ -1010,7 +1011,7 @@ export class TopicalStore {
         if (!await exists(target)) continue;
         const content = await readFile(target, "utf8");
         const parsed = parseFrontmatter(content);
-        const explanation = explainFileMatch(file.path, parsed.body, topic.matchedTerms);
+        const explanation = explainFileMatch(file.path, parsed.body, topic.matchedTerms, topic.aliasMatchedTerms);
         files.push({
           ...file,
           ...explanation,
