@@ -9,8 +9,12 @@
   "scripts": {
     "start": "node src/server.js",
     "doctor": "node src/server.js --doctor",
+    "preflight": "node src/runtime-preflight.js",
+    "pretest": "node src/runtime-preflight.js",
     "test": "node --test test/*.test.js",
+    "pretest:retrieval": "node src/runtime-preflight.js",
     "test:retrieval": "node --test test/search-index.test.js test/benchmark-fixtures.test.js",
+    "prebenchmark:v0.4": "node src/runtime-preflight.js",
     "benchmark:v0.4": "node benchmark/run-v0.4-baseline.js"
   },
   "engines": {

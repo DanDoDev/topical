@@ -63,6 +63,8 @@ Add `--json` for machine-readable output. The doctor checks the runtime, MCP dep
 
 When Node 24 is active and `.env` contains `TOPICAL_ROOT`, `npm run doctor` is the local shortcut.
 
+For development, `npm run preflight` checks the runtime without loading native dependencies. The test, retrieval-test, and benchmark npm scripts run this check automatically, so an unsupported Node version fails with recovery instructions instead of attempting to load SQLite.
+
 If an MCP host reports that Topical exited, closed its connection, or exposed no tools:
 
 1. Run `node --version`; Topical v0.4 requires Node 24.x.

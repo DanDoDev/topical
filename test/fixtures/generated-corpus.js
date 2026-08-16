@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 export const BENCHMARK_DOCUMENT_COUNTS = Object.freeze([100, 1_000, 10_000]);
+export const BENCHMARK_FIXTURE_ID = "generated-corpus-v1";
 
 function contextMarkdown(topicNumber) {
   const french = topicNumber % 5 === 0;

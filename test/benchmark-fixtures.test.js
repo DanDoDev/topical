@@ -6,9 +6,15 @@ import test from "node:test";
 
 import { TopicalStore } from "../src/store.js";
 import { auditLegacyIndexes } from "../benchmark/legacy-index-audit.js";
-import { BENCHMARK_DOCUMENT_COUNTS, generateBenchmarkFixture, materializeBenchmarkFixture } from "./fixtures/generated-corpus.js";
+import {
+  BENCHMARK_DOCUMENT_COUNTS,
+  BENCHMARK_FIXTURE_ID,
+  generateBenchmarkFixture,
+  materializeBenchmarkFixture
+} from "./fixtures/generated-corpus.js";
 
 test("generated benchmark fixtures contain exactly 100, 1,000, and 10,000 documents", () => {
+  assert.equal(BENCHMARK_FIXTURE_ID, "generated-corpus-v1");
   for (const documentCount of BENCHMARK_DOCUMENT_COUNTS) {
     const fixture = generateBenchmarkFixture(documentCount);
     assert.equal(fixture.topics.flatMap((topic) => topic.files).length, documentCount);

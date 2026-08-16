@@ -4,8 +4,14 @@ import path from "node:path";
 import process from "node:process";
 import { performance } from "node:perf_hooks";
 
+import { SqliteSearchIndex } from "../src/sqlite-search-index.js";
 import { TopicalStore } from "../src/store.js";
-import { BENCHMARK_DOCUMENT_COUNTS, generateBenchmarkFixture, materializeBenchmarkFixture } from "../test/fixtures/generated-corpus.js";
+import {
+  BENCHMARK_DOCUMENT_COUNTS,
+  BENCHMARK_FIXTURE_ID,
+  generateBenchmarkFixture,
+  materializeBenchmarkFixture
+} from "../test/fixtures/generated-corpus.js";
 import { auditLegacyIndexes } from "./legacy-index-audit.js";
 
 function elapsed(start) {
@@ -58,7 +64,26 @@ async function benchmark(documentCount) {
         querySamples.push(elapsed(start));
       }
     }
-    return { documentCount, coldRebuildMs, warmStartupMs, mutationMs, query: distribution(querySamples), index };
+    await store.close();
+    store = null;
+
+    const searchIndex = new SqliteSearchIndex(root);
+    const searchHealth = await searchIndex.health();
+    await searchIndex.close();
+
+    return {
+      documentCount,
+      coldRebuildMs,
+      warmStartupMs,
+      mutationMs,
+      query: distribution(querySamples),
+      search: {
+        sqliteVersion: searchHealth.sqliteVersion,
+        fts5: searchHealth.fts5,
+        schemaVersion: searchHealth.schemaVersion
+      },
+      index
+    };
   } finally {
     await store?.close();
     if (root.startsWith(`${os.tmpdir()}${path.sep}topical-v04-`)) {
@@ -80,6 +105,7 @@ for (const size of sizes) results.push(await benchmark(size));
 process.stdout.write(`${JSON.stringify({
   recordedAt: new Date().toISOString(),
   runtime: { node: process.version, platform: process.platform, arch: process.arch },
+  fixture: { id: BENCHMARK_FIXTURE_ID, documentCounts: sizes },
   implementation: "v0.4 SQLite FTS5 derived search cache",
   results
 }, null, 2)}\n`);
