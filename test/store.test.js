@@ -28,7 +28,7 @@ test("creates a Markdown topic and indexes its metadata", async () => {
   assert.match(context, /title: "Hue Lighting Effects"/);
   assert.match(context, /# Decisions/);
 
-  const topics = await store.listTopics({ tags: ["hue"] });
+  const { topics } = await store.listTopics({ tags: ["hue"] });
   assert.deepEqual(topics.map((topic) => topic.id), ["hue-lighting-effects"]);
   const rootIndex = JSON.parse(await readFile(path.join(root, "index.json"), "utf8"));
   assert.equal(rootIndex.topics[0].lastAction.description, "Created the Hue lighting effects topic.");
@@ -139,7 +139,7 @@ test("updates a file with conflict protection and named-section replacement", as
   assert.match(after.content, /Confirm regional availability/);
   await assert.rejects(
     () => store.updateTopicFile({ topic: "payments", content: "stale", expectedHash: before.hash, description: "Tried to write stale content." }),
-    (error) => error instanceof TopicalError && /changed since it was read/.test(error.message)
+    (error) => error instanceof TopicalError && error.code === "CONFLICT"
   );
 });
 
@@ -159,13 +159,84 @@ test("protects paths and soft-deletes files and topics", async () => {
     () => store.deleteTopicFile({ topic: "docs", filePath: "context.md", confirm: true, description: "Tried to remove required context." }),
     (error) => error instanceof TopicalError && /cannot be deleted/.test(error.message)
   );
-  const removedFile = await store.deleteTopicFile({ topic: "docs", filePath: "tickets/42.md", confirm: true, description: "Archived obsolete ticket notes." });
-  assert.match(removedFile.trashedTo, /\.trash/);
-  await store.deleteTopic({ topic: "docs", confirm: true, description: "Archived the completed documentation topic." });
-  const topics = await store.listTopics();
+  const ticket = await store.readTopicFile({ topic: "docs", filePath: "tickets/42.md" });
+  const removedFile = await store.deleteTopicFile({ topic: "docs", filePath: "tickets/42.md", expectedHash: ticket.hash, confirm: true, description: "Archived obsolete ticket notes." });
+  assert.equal(removedFile.trash.type, "file");
+  const context = await store.readTopicFile({ topic: "docs" });
+  await store.deleteTopic({ topic: "docs", expectedHash: context.hash, confirm: true, description: "Archived the completed documentation topic." });
+  const { topics } = await store.listTopics();
   assert.equal(topics.length, 0);
   const rootIndex = JSON.parse(await readFile(path.join(root, "index.json"), "utf8"));
   assert.equal(rootIndex.recentActions[0].action, "delete_topic");
+});
+
+test("taxonomy is bounded and read-only", async () => {
+  const { root, store } = await createStore();
+  await store.createTopic({ title: "Taxonomy one", summary: "", tags: ["Café-Ops", "singleton"], description: "Created the first taxonomy topic." });
+  await store.createTopic({ title: "Taxonomy two", summary: "", tags: ["cafe_ops", "singletom", "third", "fourth"], description: "Created the second taxonomy topic." });
+  const rootPath = path.join(root, "index.json");
+  const before = await readFile(rootPath, "utf8");
+  const taxonomy = await store.listTags({ limit: 2 });
+  const after = await readFile(rootPath, "utf8");
+
+  assert.equal(taxonomy.tags.length, 2);
+  assert.ok(taxonomy.page.nextCursor);
+  assert.equal(taxonomy.summary.topics, 2);
+  assert.equal(taxonomy.summary.topicsAboveGuidance, 1);
+  assert.equal(taxonomy.warnings.comparisonCollisions.length, 1);
+  assert.ok(taxonomy.warnings.nearDuplicates.some((entry) => entry.keys.includes("singleton") && entry.keys.includes("singletom")));
+  assert.equal(after, before);
+});
+
+test("topic, history, and health reads are bounded, stable, and read-only", async () => {
+  const { root, store } = await createStore();
+  await store.createTopic({ title: "Page alpha", summary: "", tags: [], description: "Created the alpha page fixture." });
+  await store.createTopic({ title: "Page beta", summary: "", tags: [], description: "Created the beta page fixture." });
+  const rootPath = path.join(root, "index.json");
+  const before = await readFile(rootPath, "utf8");
+
+  const first = await store.listTopics({ sort: "title", limit: 1 });
+  const second = await store.listTopics({ sort: "title", cursor: first.page.nextCursor, limit: 1 });
+  assert.deepEqual(first.topics.map((topic) => topic.id), ["page-alpha"]);
+  assert.deepEqual(second.topics.map((topic) => topic.id), ["page-beta"]);
+  assert.equal(second.page.nextCursor, null);
+
+  const history = await store.listHistory({ topic: "page-alpha", limit: 1 });
+  assert.equal(history.events[0].action, "create_topic");
+  const health = await store.getSystemHealth();
+  assert.equal(health.status, "ready");
+  assert.equal(health.markdownAuthority, true);
+  assert.equal(health.catalogue.topics, 2);
+  assert.equal(health.search.fts5, true);
+  assert.equal(health.rebuildRecommended, false);
+  assert.equal(await readFile(rootPath, "utf8"), before);
+});
+
+test("metadata, deletion, and restore require reviewed hashes", async () => {
+  const { store } = await createStore();
+  await store.createTopic({ title: "Recoverable", summary: "Initial.", tags: [], description: "Created the recoverable topic." });
+  await store.createTopicFile({ topic: "recoverable", filePath: "notes.md", content: "Recoverable notes.", description: "Added recoverable notes." });
+  const context = await store.readTopicFile({ topic: "recoverable" });
+  await assert.rejects(
+    () => store.updateTopicMetadata({ topic: "recoverable", summary: "Stale.", expectedHash: "0".repeat(64), description: "Tried a stale metadata update." }),
+    (error) => error instanceof TopicalError && error.code === "CONFLICT"
+  );
+  const metadata = await store.updateTopicMetadata({ topic: "recoverable", summary: "Reviewed.", expectedHash: context.hash, description: "Updated reviewed metadata." });
+  assert.equal(metadata.hash, (await store.readTopicFile({ topic: "recoverable" })).hash);
+
+  const notes = await store.readTopicFile({ topic: "recoverable", filePath: "notes.md" });
+  const deletedFile = await store.deleteTopicFile({ topic: "recoverable", filePath: "notes.md", expectedHash: notes.hash, confirm: true, description: "Archived reviewed notes." });
+  const trash = await store.listTrash({ topic: "recoverable" });
+  assert.equal(trash.entries[0].id, deletedFile.trash.id);
+  assert.equal(trash.retention.automaticDeletion, false);
+  await store.restoreTrash({ id: deletedFile.trash.id, expectedHash: notes.hash, description: "Restored reviewed notes." });
+  assert.equal((await store.readTopicFile({ topic: "recoverable", filePath: "notes.md" })).content, notes.content);
+
+  const reviewedContext = await store.readTopicFile({ topic: "recoverable" });
+  const deletedTopic = await store.deleteTopic({ topic: "recoverable", expectedHash: reviewedContext.hash, confirm: true, description: "Archived the reviewed topic." });
+  await store.restoreTrash({ id: deletedTopic.trash.id, expectedHash: reviewedContext.hash, description: "Restored the reviewed topic." });
+  assert.equal((await store.listTopics()).topics[0].id, "recoverable");
+  assert.equal((await store.listTrash()).entries.length, 0);
 });
 
 test("reindexes topic metadata after a direct Markdown edit", async () => {
@@ -175,7 +246,7 @@ test("reindexes topic metadata after a direct Markdown edit", async () => {
   await writeFile(contextPath, `---\ntitle: "Release planning"\nsummary: "Updated manually."\ntags: ["v2", "planning"]\ncreated_at: 2026-07-01T00:00:00.000Z\nupdated_at: 2026-07-18T00:00:00.000Z\n---\n\n# Plan\n`, "utf8");
 
   await store.reindex();
-  const [topic] = await store.listTopics({ tags: ["planning"] });
+  const [topic] = (await store.listTopics({ tags: ["planning"] })).topics;
   assert.equal(topic.title, "Release planning");
   assert.equal(topic.summary, "Updated manually.");
 });
@@ -188,16 +259,16 @@ test("uses one canonical tag identity and parses JSON tags containing commas", a
     tags: [" Café Ops ", "café   ops", "cafe ops", "alpha, beta"],
     description: "Created the canonical tag fixture."
   });
-  const [topic] = await store.listTopics({ tags: ["CAFÉ OPS"] });
+  const [topic] = (await store.listTopics({ tags: ["CAFÉ OPS"] })).topics;
   assert.deepEqual(topic.tags, ["Café Ops", "cafe ops", "alpha, beta"]);
-  assert.equal((await store.listTopics({ tags: ["cafe ops"] })).length, 1);
+  assert.equal((await store.listTopics({ tags: ["cafe ops"] })).topics.length, 1);
   assert.equal((await store.searchTopics({ query: "", tags: ["alpha, beta"] })).topics.length, 1);
 
   const contextPath = path.join(root, "tag-identity", "context.md");
   const context = await readFile(contextPath, "utf8");
   assert.match(context, /"alpha, beta"/);
   await store.reindex();
-  assert.deepEqual((await store.listTopics())[0].tags, ["Café Ops", "cafe ops", "alpha, beta"]);
+  assert.deepEqual((await store.listTopics()).topics[0].tags, ["Café Ops", "cafe ops", "alpha, beta"]);
 });
 
 test("search returns bounded analysis for ignored query terms", async () => {

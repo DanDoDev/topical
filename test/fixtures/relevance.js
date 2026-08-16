@@ -1,4 +1,4 @@
-export const RELEVANCE_FIXTURE_ID = "relevance-v2";
+export const RELEVANCE_FIXTURE_ID = "relevance-v4";
 
 export const RELEVANCE_DOCUMENTS = Object.freeze([
   {
@@ -189,20 +189,22 @@ export const RELEVANCE_EVALUATION_CASES = Object.freeze([
     forbiddenTopics: []
   },
   {
-    id: "technical-identifier-separated-miss",
+    id: "technical-identifier-separated-alias",
     query: "expected hash",
-    expectedMode: "relaxed",
-    expectedFirst: null,
-    allowedTopics: [],
-    forbiddenTopics: ["identifier-contracts"]
+    expectedMode: "strict",
+    expectedFirst: "identifier-contracts",
+    allowedTopics: ["identifier-contracts"],
+    forbiddenTopics: [],
+    expectedFirstFields: ["aliases"]
   },
   {
-    id: "joined-technical-identifier-miss",
+    id: "joined-technical-identifier-alias",
     query: "nodejs",
-    expectedMode: "relaxed",
-    expectedFirst: null,
-    allowedTopics: [],
-    forbiddenTopics: ["identifier-contracts"]
+    expectedMode: "strict",
+    expectedFirst: "identifier-contracts",
+    allowedTopics: ["identifier-contracts"],
+    forbiddenTopics: [],
+    expectedFirstFields: ["aliases"]
   },
   {
     id: "separator-neutral-identifier",
@@ -245,12 +247,12 @@ export const RELEVANCE_EVALUATION_CASES = Object.freeze([
     forbiddenTopics: []
   },
   {
-    id: "french-morphology-miss",
+    id: "conservative-french-edit-expansion",
     query: "projet validation",
-    expectedMode: "relaxed",
-    expectedFirst: null,
-    allowedTopics: [],
-    forbiddenTopics: ["morphology-reference"]
+    expectedMode: "expanded",
+    expectedFirst: "morphology-reference",
+    allowedTopics: ["morphology-reference"],
+    forbiddenTopics: []
   },
   {
     id: "accent-and-apostrophe-neutral",

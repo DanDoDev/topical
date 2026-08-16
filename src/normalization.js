@@ -13,8 +13,44 @@ export const CONTRACT_LIMITS = Object.freeze({
 
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/u;
 
+export function boundedEditDistance(left, right, maximum = 2) {
+  if (Math.abs(left.length - right.length) > maximum) return maximum + 1;
+  let previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
+    const current = [leftIndex];
+    let rowMinimum = current[0];
+    for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
+      const cost = left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1;
+      current[rightIndex] = Math.min(
+        current[rightIndex - 1] + 1,
+        previous[rightIndex] + 1,
+        previous[rightIndex - 1] + cost
+      );
+      rowMinimum = Math.min(rowMinimum, current[rightIndex]);
+    }
+    if (rowMinimum > maximum) return maximum + 1;
+    previous = current;
+  }
+  return previous[right.length];
+}
+
 export function normalizeSearchText(value) {
   return String(value).normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+}
+
+export function normalizedSearchView(value) {
+  const source = String(value);
+  let text = "";
+  const sourceOffsets = [];
+  let sourceOffset = 0;
+  for (const character of source) {
+    const normalized = normalizeSearchText(character);
+    text += normalized;
+    for (let index = 0; index < normalized.length; index += 1) sourceOffsets.push(sourceOffset);
+    sourceOffset += character.length;
+  }
+  sourceOffsets.push(source.length);
+  return { text, sourceOffsets };
 }
 
 export function canonicalTagKey(value) {
@@ -157,4 +193,33 @@ export function queryAnalysisResponse(analysis) {
     ignoredTerms: analysis.ignoredTerms.map((term) => ({ ...term })),
     limits: { ...analysis.limits }
   };
+}
+
+export function technicalAliasEntries(value, { limit = 200 } = {}) {
+  const source = String(value || "");
+  const tokens = source.match(/[A-Za-z][A-Za-z0-9]*(?:[._/-][A-Za-z0-9]+)+|[a-z0-9]+(?:[A-Z][A-Za-z0-9]*)+/g) || [];
+  const entries = [];
+  const seen = new Set();
+  for (const token of tokens) {
+    const separated = token
+      .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+      .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+      .replace(/[._/-]+/g, " ");
+    const parts = (separated.match(/[A-Za-z0-9]+/g) || []).map(normalizeSearchText).filter(Boolean);
+    if (parts.length < 2) continue;
+    for (const alias of [parts.join(" "), parts.join("")]) {
+      const key = `${token}\u0000${alias}`;
+      if (!alias || seen.has(key)) continue;
+      seen.add(key);
+      entries.push({ source: token, alias });
+      if (entries.length >= limit) return entries;
+    }
+  }
+  return entries;
+}
+
+export function technicalAliasText(values, options) {
+  return technicalAliasEntries(Array.isArray(values) ? values.join("\n") : values, options)
+    .map((entry) => entry.alias)
+    .join("\n");
 }

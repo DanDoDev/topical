@@ -4,10 +4,16 @@ import path from "node:path";
 
 import Database from "better-sqlite3";
 
-import { analyzeQuery, canonicalTagKey, normalizeSearchText } from "./normalization.js";
+import {
+  analyzeQuery,
+  boundedEditDistance,
+  canonicalTagKey,
+  normalizeSearchText,
+  technicalAliasText
+} from "./normalization.js";
 import { SearchIndex, SEARCH_MATCH_MODE } from "./search-index.js";
 
-export const SEARCH_SCHEMA_VERSION = 3;
+export const SEARCH_SCHEMA_VERSION = 4;
 const CACHE_DIRECTORY = ".topical-cache";
 const CACHE_FILENAME = "search.sqlite";
 
@@ -115,6 +121,7 @@ function createSchema(database) {
       path,
       headings,
       body,
+      aliases,
       content='',
       contentless_delete=1,
       tokenize='unicode61 remove_diacritics 2'
@@ -127,11 +134,14 @@ function createSchema(database) {
       path,
       headings,
       body,
+      aliases,
       content='',
       contentless_delete=1,
       detail=column,
       tokenize='unicode61 remove_diacritics 2'
     );
+
+    CREATE VIRTUAL TABLE topic_vocab USING fts5vocab(topic_search, 'row');
   `);
   database.prepare("INSERT INTO metadata(key, value) VALUES (?, ?)").run("schema_version", String(SEARCH_SCHEMA_VERSION));
   database.prepare("INSERT INTO metadata(key, value) VALUES (?, ?)").run("built_at", new Date().toISOString());
@@ -174,12 +184,12 @@ function insertTopic(database, snapshot) {
     VALUES (@recordKey, @kind, @topic, @path, @headingsJson, @excerpt, @hash, @size)
   `);
   const insertSearch = database.prepare(`
-    INSERT INTO search(rowid, title, summary, tags, path, headings, body)
-    VALUES (@rowid, @title, @summary, @tags, @path, @headings, @body)
+    INSERT INTO search(rowid, title, summary, tags, path, headings, body, aliases)
+    VALUES (@rowid, @title, @summary, @tags, @path, @headings, @body, @aliases)
   `);
   const insertTopicSearch = database.prepare(`
-    INSERT INTO topic_search(rowid, title, summary, tags, path, headings, body)
-    VALUES (@rowid, @title, @summary, @tags, @path, @headings, @body)
+    INSERT INTO topic_search(rowid, title, summary, tags, path, headings, body, aliases)
+    VALUES (@rowid, @title, @summary, @tags, @path, @headings, @body, @aliases)
   `);
 
   const topicRecord = insertRecord.run({
@@ -199,7 +209,8 @@ function insertTopic(database, snapshot) {
     tags: (topic.tags || []).join(" "),
     path: "",
     headings: "",
-    body: ""
+    body: "",
+    aliases: technicalAliasText([topic.title, topic.summary, ...(topic.tags || [])])
   });
 
   const aggregatePaths = [];
@@ -226,7 +237,8 @@ function insertTopic(database, snapshot) {
       tags: "",
       path: document.path,
       headings: (document.headings || []).join("\n"),
-      body: document.body || ""
+      body: document.body || "",
+      aliases: technicalAliasText([document.path, ...(document.headings || []), document.body || ""])
     });
   }
   insertTopicSearch.run({
@@ -236,12 +248,20 @@ function insertTopic(database, snapshot) {
     tags: (topic.tags || []).join(" "),
     path: aggregatePaths.join("\n"),
     headings: aggregateHeadings.join("\n"),
-    body: aggregateBodies.join("\n")
+    body: aggregateBodies.join("\n"),
+    aliases: technicalAliasText([
+      topic.title,
+      topic.summary,
+      ...(topic.tags || []),
+      ...aggregatePaths,
+      ...aggregateHeadings,
+      ...aggregateBodies
+    ])
   });
 }
 
 function fieldBoost(fields) {
-  const weights = { title: 30, summary: 20, tags: 15, headings: 12, path: 8, body: 3 };
+  const weights = { title: 30, summary: 20, tags: 15, headings: 12, path: 8, body: 3, aliases: 1 };
   return fields.reduce((score, field) => score + (weights[field] || 0), 0);
 }
 
@@ -286,6 +306,7 @@ export class SqliteSearchIndex extends SearchIndex {
       }
       database.prepare("SELECT rowid FROM search LIMIT 1").get();
       database.prepare("SELECT rowid FROM topic_search LIMIT 1").get();
+      database.prepare("SELECT term FROM topic_vocab LIMIT 1").get();
       this.#database = database;
       this.#status = "ready";
       this.#statusMessage = null;
@@ -385,12 +406,42 @@ export class SqliteSearchIndex extends SearchIndex {
     return allowed || new Set();
   }
 
+  #expandedAnalysis(database, analysis) {
+    const lookupExact = database.prepare("SELECT term FROM topic_vocab WHERE term = ? LIMIT 1").pluck();
+    const lookupPrefix = database.prepare("SELECT term FROM topic_vocab WHERE term >= ? AND term < ? ORDER BY term LIMIT 250").pluck();
+    const expansions = [];
+    const terms = [];
+    for (const term of analysis.terms) {
+      if (lookupExact.get(term.normalized)) {
+        terms.push({ ...term, source: term.normalized });
+        continue;
+      }
+      const characters = [...term.normalized];
+      if (characters.length < 5) return null;
+      const prefix = characters.slice(0, 2).join("");
+      const candidates = lookupPrefix.all(prefix, `${prefix}\u{10ffff}`)
+        .filter((candidate) => Math.abs([...candidate].length - characters.length) <= 1)
+        .filter((candidate) => boundedEditDistance(term.normalized, candidate, 1) === 1);
+      if (candidates.length !== 1) return null;
+      const corrected = candidates[0];
+      expansions.push({ from: term.normalized, to: corrected, distance: 1 });
+      terms.push({ source: corrected, normalized: corrected });
+    }
+    if (!expansions.length) return null;
+    return { ...analysis, terms, normalized: terms.map((term) => term.normalized).join(" "), expansions };
+  }
+
   async query({ query, analysis, tags = [], limit = 10, matchMode = SEARCH_MATCH_MODE.STRICT }) {
     await this.#inspect();
     const database = this.#requireReady();
     const boundedLimit = Math.max(1, Math.min(Number(limit) || 10, 50));
     const allowed = this.#allowedTopics(tags);
-    const terms = (analysis || analyzeQuery(query)).terms;
+    let queryAnalysis = analysis || analyzeQuery(query);
+    if (matchMode === SEARCH_MATCH_MODE.EXPANDED) {
+      queryAnalysis = this.#expandedAnalysis(database, queryAnalysis);
+      if (!queryAnalysis) return [];
+    }
+    const terms = queryAnalysis.terms;
     if (!terms.length) {
       const rows = database.prepare(`
         SELECT topic, title, summary, tags_json, updated_at
@@ -420,11 +471,11 @@ export class SqliteSearchIndex extends SearchIndex {
     const documentTopicQuery = database.prepare(`
       SELECT DISTINCT records.topic
       FROM search JOIN records ON records.id = search.rowid
-      WHERE search MATCH ?
+      WHERE search MATCH ? AND records.kind = 'document'
     `).pluck();
     const candidateQuery = database.prepare(`
       SELECT records.topic, topics.title, topics.summary, topics.tags_json, topics.updated_at,
-             bm25(topic_search, 10.0, 7.0, 6.0, 4.0, 5.0, 1.0) AS rank
+             bm25(topic_search, 10.0, 7.0, 6.0, 4.0, 5.0, 1.0, 0.5) AS rank
       FROM topic_search
       JOIN records ON records.id = topic_search.rowid
       JOIN topics ON topics.topic = records.topic
@@ -432,28 +483,40 @@ export class SqliteSearchIndex extends SearchIndex {
       ORDER BY rank
     `);
     const candidateExpression = terms.map((term) => ftsToken(term.source))
-      .join(matchMode === SEARCH_MATCH_MODE.STRICT ? " AND " : " OR ");
+      .join(matchMode === SEARCH_MATCH_MODE.RELAXED ? " OR " : " AND ");
     const candidateRows = candidateQuery.all(candidateExpression)
       .filter((row) => allowed === null || allowed.has(row.topic));
     if (!candidateRows.length) return [];
     const topicSets = terms.map((term) => new Set(topicQuery.all(ftsToken(term.source))));
 
     const phraseTopics = new Set();
+    const cohesiveTopics = new Set();
     if (terms.length > 1) {
       const phrase = `"${terms.map((term) => term.source.replaceAll('"', '""')).join(" ")}"`;
       for (const topic of documentTopicQuery.all(phrase)) phraseTopics.add(topic);
+      const allTermsInOneFile = terms.map((term) => ftsToken(term.source)).join(" AND ");
+      for (const topic of documentTopicQuery.all(allTermsInOneFile)) cohesiveTopics.add(topic);
     }
 
     const grouped = new Map(candidateRows.map((row) => {
       const matched = terms.filter((_term, index) => topicSets[index].has(row.topic)).map((term) => term.normalized);
+      const exactTitle = normalizeSearchText(row.title).trim() === queryAnalysis.normalized.trim();
+      const sameFile = terms.length <= 1 || cohesiveTopics.has(row.topic);
       return [row.topic, {
         topic: row.topic,
         title: row.title,
         summary: row.summary,
         tags: parseJson(row.tags_json, []),
         updatedAt: row.updated_at,
-        score: matched.length * 100 + (phraseTopics.has(row.topic) ? 50 : 0) + Math.max(0, -Number(row.rank || 0) * 1000),
+        score: matched.length * 100
+          + (exactTitle ? 5_000 : 0)
+          + (phraseTopics.has(row.topic) ? 250 : 0)
+          + (terms.length > 1 && sameFile ? 100 : 0)
+          + Math.max(0, -Number(row.rank || 0) * 1000),
+        exactTitle,
+        termCohesion: terms.length <= 1 ? "single_term" : (sameFile ? "same_file" : "distributed"),
         matchedTerms: new Set(matched),
+        aliasMatchedTerms: new Set(),
         matchedFields: new Set(),
         files: new Map()
       }];
@@ -462,6 +525,7 @@ export class SqliteSearchIndex extends SearchIndex {
     for (const [termIndex, term] of terms.entries()) {
       const pathMatches = new Set(topicQuery.all(`path:${ftsToken(term.source)}`));
       const headingMatches = new Set(topicQuery.all(`headings:${ftsToken(term.source)}`));
+      const aliasMatches = new Set(topicQuery.all(`aliases:${ftsToken(term.source)}`));
       for (const topic of grouped.values()) {
         if (!topicSets[termIndex].has(topic.topic)) continue;
         const metadataFields = [];
@@ -470,6 +534,10 @@ export class SqliteSearchIndex extends SearchIndex {
         if (topic.tags.some((tag) => normalizeSearchText(tag).includes(term.normalized))) metadataFields.push("tags");
         if (pathMatches.has(topic.topic)) metadataFields.push("path");
         if (headingMatches.has(topic.topic)) metadataFields.push("headings");
+        if (aliasMatches.has(topic.topic)) {
+          metadataFields.push("aliases");
+          topic.aliasMatchedTerms.add(term.normalized);
+        }
         if (!metadataFields.length) metadataFields.push("body");
         metadataFields.forEach((field) => topic.matchedFields.add(field));
         topic.score += fieldBoost(metadataFields);
@@ -483,22 +551,28 @@ export class SqliteSearchIndex extends SearchIndex {
     const finalistByTopic = new Map(finalists.map((topic) => [topic.topic, topic]));
     const placeholders = finalists.map(() => "?").join(", ");
     const fileHitQuery = database.prepare(`
-      SELECT records.topic, records.path, records.hash,
-             bm25(search, 10.0, 7.0, 6.0, 4.0, 5.0, 1.0) AS rank
+      SELECT records.id, records.topic, records.path, records.hash,
+             bm25(search, 10.0, 7.0, 6.0, 4.0, 5.0, 1.0, 0.5) AS rank
       FROM search
       JOIN records ON records.id = search.rowid
       WHERE search MATCH ? AND records.topic IN (${placeholders}) AND records.kind = 'document'
       ORDER BY rank
     `);
+    const matchingRowIds = database.prepare("SELECT rowid FROM search WHERE search MATCH ?").pluck();
+    const fileTermRows = terms.map((term) => new Set(matchingRowIds.all(ftsToken(term.source))));
+    const aliasTermRows = terms.map((term) => new Set(matchingRowIds.all(`aliases:${ftsToken(term.source)}`)));
     for (const row of fileHitQuery.all(fileExpression, ...finalistByTopic.keys())) {
       const topic = finalistByTopic.get(row.topic);
       if (topic.files.size >= 3) continue;
+      const fileMatchedTerms = terms
+        .filter((_term, index) => fileTermRows[index].has(row.id))
+        .map((term) => term.normalized);
       topic.files.set(row.path, {
         path: row.path,
         hash: row.hash,
-        score: 10 + Math.max(0, -Number(row.rank || 0) * 1000),
-        matchedTerms: new Set(topic.matchedTerms),
-        matchedFields: new Set()
+        score: fileMatchedTerms.length * 10 + Math.max(0, -Number(row.rank || 0) * 1000),
+        matchedTerms: new Set(fileMatchedTerms),
+        matchedFields: new Set(terms.some((_term, index) => aliasTermRows[index].has(row.id)) ? ["aliases"] : [])
       });
     }
 
@@ -518,6 +592,10 @@ export class SqliteSearchIndex extends SearchIndex {
           summary: topic.summary,
           tags: topic.tags,
           score: Number(topic.score.toFixed(6)),
+          exactTitle: topic.exactTitle,
+          termCohesion: topic.termCohesion,
+          queryExpansions: queryAnalysis.expansions || [],
+          aliasMatchedTerms: [...topic.aliasMatchedTerms],
           matchedTerms: [...topic.matchedTerms],
           matchedFields: [...topic.matchedFields],
           files: files.map((file) => ({

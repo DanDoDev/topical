@@ -146,7 +146,7 @@ test("missing JSON catalogues rebuild even when the SQLite cache is compatible",
 
   const missingRoot = new TopicalStore(root);
   await missingRoot.initialize();
-  assert.equal((await missingRoot.listTopics())[0]?.id, "catalogue-recovery");
+  assert.equal((await missingRoot.listTopics()).topics[0]?.id, "catalogue-recovery");
   await missingRoot.close();
   await unlink(path.join(root, "catalogue-recovery", "index.json"));
 
@@ -190,9 +190,11 @@ test("soft deletion removes stale document and topic postings", async (t) => {
   await store.createTopic({ title: "Deletion search", summary: "Soft deletion test.", tags: [], description: "Created the deletion search topic." });
   await store.createTopicFile({ topic: "deletion-search", filePath: "obsolete.md", content: "Ephemeral obsidian posting.", description: "Added the obsolete search posting." });
   assert.equal((await store.searchTopics({ query: "obsidian posting" })).topics[0]?.topic, "deletion-search");
-  await store.deleteTopicFile({ topic: "deletion-search", filePath: "obsolete.md", confirm: true, description: "Archived the obsolete search posting." });
+  const obsolete = await store.readTopicFile({ topic: "deletion-search", filePath: "obsolete.md" });
+  await store.deleteTopicFile({ topic: "deletion-search", filePath: "obsolete.md", expectedHash: obsolete.hash, confirm: true, description: "Archived the obsolete search posting." });
   assert.equal((await store.searchTopics({ query: "obsidian posting" })).topics.length, 0);
-  await store.deleteTopic({ topic: "deletion-search", confirm: true, description: "Archived the deletion search topic." });
+  const context = await store.readTopicFile({ topic: "deletion-search" });
+  await store.deleteTopic({ topic: "deletion-search", expectedHash: context.hash, confirm: true, description: "Archived the deletion search topic." });
   assert.equal((await store.searchTopics({ query: "deletion search" })).topics.length, 0);
 });
 
@@ -214,8 +216,23 @@ test("tag filters remain exact and empty queries return bounded topic listings",
   const filtered = await store.searchTopics({ query: "atlas", tags: ["operations"] });
   assert.deepEqual(filtered.topics.map((topic) => topic.topic), ["filtered-one"]);
   const listing = await store.searchTopics({ query: "", limit: 1 });
-  assert.equal(listing.matchMode, "strict");
+  assert.equal(listing.matchMode, "listing");
   assert.equal(listing.topics.length, 1);
+});
+
+test("Unicode-safe snippets preserve source characters after accent folding", async (t) => {
+  const { store } = await createStore(t);
+  const marker = `Caf${"e\u0301"} sentinel`;
+  await store.createTopic({
+    title: "Unicode snippet",
+    summary: "Offset mapping fixture.",
+    tags: [],
+    initialContent: `${"🙂 prose ".repeat(30)}${marker} remains intact.`,
+    description: "Created the Unicode snippet fixture."
+  });
+  const result = await store.searchTopics({ query: "cafe sentinel" });
+  assert.match(result.topics[0].files[0].snippet, new RegExp(marker));
+  assert.doesNotMatch(result.topics[0].files[0].snippet, /�/);
 });
 
 test("cache paths reject symlinks before SQLite opens them", async () => {

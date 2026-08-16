@@ -134,13 +134,15 @@ topical-files/
 
 ## Tools
 
-- `search_topics` returns topic-grouped results. It first requires all meaningful query terms across a topic's metadata and files; only when that strict pass is empty does it return a clearly marked relaxed fallback.
-- `list_topics` lists topics by recent activity, title, or creation time.
+- `search_topics` returns topic-grouped results. It tries strict matching first, a clearly marked relaxed fallback second, and only after both are empty may apply a conservative, visible one-edit expansion.
+- `list_topics` lists bounded pages of topics by recent activity, title, or creation time.
+- `list_tags` reports tag usage and advisory taxonomy warnings without rewriting Markdown.
+- `list_history` returns bounded audit-history pages, and `get_system_health` reports catalogue and disposable-cache health.
 - `create_topic`, `read_topic_file`, and `update_topic_file` manage core context.
 - `get_topic_overview` returns a bounded briefing, file inventory, and recent history before an agent reads detailed notes.
 - `create_topic_file` and `delete_topic_file` manage supporting Markdown files.
 - `update_topic_metadata` edits frontmatter safely.
-- `delete_topic` moves a topic to `.trash` instead of permanently deleting it.
+- `delete_topic` moves a topic to recoverable `.trash` storage instead of permanently deleting it; `list_trash` and `restore_trash` provide explicit recovery.
 - `reindex_topical` rebuilds derived indexes after manual filesystem edits.
 - Publication tools create and review explicit independent Markdown checkpoints; they never synchronize files automatically.
 
@@ -150,24 +152,28 @@ All mutation tools require a one-sentence `description`. It is recorded in the r
 
 | Tool | Important inputs | Result |
 | --- | --- | --- |
-| `search_topics` | `query`, optional exact `tags`, `limit` | `{ query, matchMode, topics }`, with each topic returned once and bounded file hits, clean snippets, matched terms, and matched fields. |
-| `list_topics` | optional `sort`, `tags` | Topic summaries, metadata, file count, and latest action. |
+| `search_topics` | `query`, optional exact `tags`, `limit` | `{ query, analysis, matchMode, expansions, topics }`, with each topic returned once and bounded file hits, clean snippets, matched terms, and matched fields. |
+| `list_topics` | optional `sort`, `tags`, `cursor`, `limit` | `{ topics, page }` with topic summaries and an opaque next cursor. |
+| `list_tags` | optional `query`, `cursor`, `limit` | Bounded taxonomy usage, guidance, and advisory warnings. |
+| `list_history` | optional `topic`, `cursor`, `limit` | `{ events, page }` in newest-first order. |
+| `get_system_health` | none | Read-only catalogue and SQLite search-cache health. |
 | `create_topic` | `title`, `summary`, `tags`, `initialContent`, `description` | Topic ID and `context.md` path. |
 | `read_topic_file` | `topic`, optional `filePath` | Markdown content and a SHA-256 `hash`. |
 | `get_topic_overview` | `topic`, optional `maxChars` | Bounded `context.md` briefing, file inventory, and recent history. |
 | `update_topic_file` | `topic`, `filePath`, `mode`, `content`, optional `section`, `expectedHash`, `description` | Updated file path and hash. |
 | `create_topic_file` | `topic`, `filePath`, `content`, `description` | New supporting Markdown file and hash. |
-| `delete_topic_file` | `topic`, `filePath`, `confirm: true`, `description` | Soft-delete destination. |
-| `update_topic_metadata` | `topic`, optional `title`, `summary`, `tags`, `description` | Updated frontmatter metadata. |
-| `delete_topic` | `topic`, `confirm: true`, `description` | Soft-delete destination. |
+| `delete_topic_file` | `topic`, `filePath`, `expectedHash`, `confirm: true`, `description` | Recoverable trash entry. |
+| `update_topic_metadata` | `topic`, optional `title`, `summary`, `tags`, plus `expectedHash`, `description` | Updated frontmatter metadata and hash. |
+| `delete_topic` | `topic`, `expectedHash`, `confirm: true`, `description` | Recoverable trash entry. |
+| `list_trash` / `restore_trash` | filters or trash `id`, reviewed `expectedHash`, `description` | Bounded recovery inventory or restored content. |
 | `reindex_topical` | none | Rebuilt root index. |
 | `publish_document` | `topic`, sources, destination alias/path, `content`, `description` | Creates an explicit standalone Markdown checkpoint. |
-| `list_publications` | optional `topic`, `includeArchived` | Publication records with divergence states. |
+| `list_publications` | optional `topic`, `includeArchived`, `cursor`, `limit` | `{ publications, page }` with divergence states. |
 | `get_publication_status` / `read_publication` | publication `id` | Checkpoint state, snapshot, and current document. |
 | `update_publication` | `id`, `content`, current `expectedTargetHash`, `description` | Conflict-safe new checkpoint. |
 | `forget_publication` | `id`, `confirm: true`, `description` | Archives the relationship; leaves the document untouched. |
 
-Agents should normally search before creating, then read before updating. For updates made from a prior read, pass that read's `hash` as `expectedHash` to prevent an accidental stale overwrite.
+Agents should normally search before creating, then read before updating. File updates, metadata changes, deletion, and restoration require the reviewed content `hash` as `expectedHash` to prevent an accidental stale overwrite. Tool failures use `{ error: { code, message, details? } }` so callers can handle conflicts without parsing prose.
 
 For publications, use the same focused retrieval: get an overview, read only the selected topic files, inspect any existing publication status, then draft the complete Markdown outside the MCP call. A `guidance` result may recommend review or reconciliation, but it never publishes or changes a file; publication remains an explicit `publish_document` or `update_publication` call.
 
@@ -177,7 +183,7 @@ For efficient model context, use this sequence:
 2. `get_topic_overview` to understand the topic and select the small number of relevant files.
 3. `read_topic_file` only for those files, then make a focused update.
 
-`search_topics` ranks title, summary, tag, heading, path, and body matches through SQLite FTS5. English and French text use accent-insensitive `unicode61` tokenization without English-only stemming. FTS5 stores postings rather than a second copy of Markdown; Topical reads only the best candidate files to produce final snippets, and YAML frontmatter is never used as snippet text.
+`search_topics` ranks title, summary, tag, heading, path, body, and derived technical-identifier aliases through SQLite FTS5. Accent-insensitive `unicode61` tokenization is language-agnostic and does not apply English-only stemming. A one-edit expansion is considered only when strict and relaxed exact-token passes are both empty, is rejected when ambiguous, and is reported in `expansions`. FTS5 stores postings rather than a second copy of Markdown; Topical reads only the best candidate files to produce final snippets, and YAML frontmatter is never used as snippet text.
 
 An empty query behaves like a bounded topic listing. A non-empty query reports `matchMode: "strict"` when every meaningful term matched somewhere in the topic. If no strict topic exists, Topical retries with coverage-ranked matching and reports `matchMode: "relaxed"`; widening is never silent.
 

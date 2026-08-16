@@ -28,7 +28,7 @@ test("MCP server registers and calls Topical tools over stdio", async (t) => {
   const tools = await client.listTools();
   assert.deepEqual(
     tools.tools.map((tool) => tool.name).sort(),
-    ["create_topic", "create_topic_file", "delete_topic", "delete_topic_file", "forget_publication", "get_publication_status", "get_topic_overview", "list_publications", "list_topics", "publish_document", "read_publication", "read_topic_file", "reindex_topical", "search_topics", "update_publication", "update_topic_file", "update_topic_metadata"].sort(),
+    ["create_topic", "create_topic_file", "delete_topic", "delete_topic_file", "forget_publication", "get_publication_status", "get_system_health", "get_topic_overview", "list_history", "list_publications", "list_tags", "list_topics", "list_trash", "publish_document", "read_publication", "read_topic_file", "reindex_topical", "restore_trash", "search_topics", "update_publication", "update_topic_file", "update_topic_metadata"].sort(),
     stderr.join("")
   );
   const createTopicTool = tools.tools.find((tool) => tool.name === "create_topic");
@@ -48,7 +48,8 @@ test("MCP server registers and calls Topical tools over stdio", async (t) => {
 
   const listed = await client.callTool({ name: "list_topics", arguments: { tags: ["test"] } });
   const listedBody = JSON.parse(listed.content[0].text);
-  assert.equal(listedBody[0].id, "mcp-verification");
+  assert.equal(listedBody.topics[0].id, "mcp-verification");
+  assert.equal(listedBody.page.nextCursor, null);
 
   const read = await client.callTool({ name: "read_topic_file", arguments: { topic: "mcp-verification" } });
   const readBody = JSON.parse(read.content[0].text);
@@ -64,18 +65,49 @@ test("MCP server registers and calls Topical tools over stdio", async (t) => {
     }
   });
   assert.equal(appended.isError, false, JSON.stringify(appended));
+  const appendedBody = JSON.parse(appended.content[0].text);
+
+  const stale = await client.callTool({
+    name: "update_topic_file",
+    arguments: {
+      topic: "mcp-verification",
+      content: "stale",
+      expectedHash: readBody.hash,
+      description: "Exercised the structured conflict response."
+    }
+  });
+  const staleBody = JSON.parse(stale.content[0].text);
+  assert.equal(stale.isError, true);
+  assert.equal(staleBody.error.code, "CONFLICT");
+  assert.equal(staleBody.error.details.currentHash, appendedBody.hash);
 
   const extraFile = await client.callTool({
     name: "create_topic_file",
     arguments: { topic: "mcp-verification", filePath: "checks/live.md", content: "Protocol test evidence.", description: "Added live protocol test evidence." }
   });
   assert.equal(extraFile.isError, false, JSON.stringify(extraFile));
+  const extraFileBody = JSON.parse(extraFile.content[0].text);
 
   const metadata = await client.callTool({
     name: "update_topic_metadata",
-    arguments: { topic: "mcp-verification", tags: ["test", "verified"], description: "Marked the topic as protocol verified." }
+    arguments: { topic: "mcp-verification", tags: ["test", "verified"], expectedHash: appendedBody.hash, description: "Marked the topic as protocol verified." }
   });
   assert.equal(metadata.isError, false, JSON.stringify(metadata));
+  const metadataBody = JSON.parse(metadata.content[0].text);
+
+  const taxonomy = await client.callTool({ name: "list_tags", arguments: { query: "verified", limit: 10 } });
+  const taxonomyBody = JSON.parse(taxonomy.content[0].text);
+  assert.equal(taxonomyBody.tags[0].key, "verified");
+
+  const history = await client.callTool({ name: "list_history", arguments: { topic: "mcp-verification", limit: 2 } });
+  const historyBody = JSON.parse(history.content[0].text);
+  assert.equal(historyBody.events.length, 2);
+  assert.ok(historyBody.page.total >= 3);
+
+  const health = await client.callTool({ name: "get_system_health", arguments: {} });
+  const healthBody = JSON.parse(health.content[0].text);
+  assert.equal(healthBody.status, "ready");
+  assert.equal(healthBody.markdownAuthority, true);
 
   const overview = await client.callTool({ name: "get_topic_overview", arguments: { topic: "mcp-verification", maxChars: 500 } });
   const overviewBody = JSON.parse(overview.content[0].text);
@@ -98,7 +130,7 @@ test("MCP server registers and calls Topical tools over stdio", async (t) => {
   assert.equal(publicationStatusBody.state, "unchanged");
   assert.deepEqual(publicationStatusBody.guidance, { action: "none", message: "The topic sources and document still match this checkpoint.", requiresExplicitAction: true });
   const publicationList = await client.callTool({ name: "list_publications", arguments: { topic: "mcp-verification" } });
-  assert.equal(JSON.parse(publicationList.content[0].text)[0].guidance.action, "none");
+  assert.equal(JSON.parse(publicationList.content[0].text).publications[0].guidance.action, "none");
   const readPublication = await client.callTool({ name: "read_publication", arguments: { id: publication.id } });
   const readPublicationBody = JSON.parse(readPublication.content[0].text);
   const revised = await client.callTool({ name: "update_publication", arguments: { id: publication.id, content: "# Revised verification\n", expectedTargetHash: readPublicationBody.record.targetHash, description: "Published a revised verification guide." } });
@@ -111,13 +143,27 @@ test("MCP server registers and calls Topical tools over stdio", async (t) => {
 
   const deletedFile = await client.callTool({
     name: "delete_topic_file",
-    arguments: { topic: "mcp-verification", filePath: "checks/live.md", confirm: true, description: "Archived the live protocol evidence file." }
+    arguments: { topic: "mcp-verification", filePath: "checks/live.md", expectedHash: extraFileBody.hash, confirm: true, description: "Archived the live protocol evidence file." }
   });
   assert.equal(deletedFile.isError, false, JSON.stringify(deletedFile));
+  const deletedFileBody = JSON.parse(deletedFile.content[0].text);
+  const trash = await client.callTool({ name: "list_trash", arguments: { topic: "mcp-verification" } });
+  assert.equal(JSON.parse(trash.content[0].text).entries[0].id, deletedFileBody.trash.id);
+  const restoredFile = await client.callTool({
+    name: "restore_trash",
+    arguments: { id: deletedFileBody.trash.id, expectedHash: extraFileBody.hash, description: "Restored the live protocol evidence file." }
+  });
+  assert.equal(restoredFile.isError, false, JSON.stringify(restoredFile));
 
   const deletedTopic = await client.callTool({
     name: "delete_topic",
-    arguments: { topic: "mcp-verification", confirm: true, description: "Archived the protocol verification topic." }
+    arguments: { topic: "mcp-verification", expectedHash: metadataBody.hash, confirm: true, description: "Archived the protocol verification topic." }
   });
   assert.equal(deletedTopic.isError, false, JSON.stringify(deletedTopic));
+  const deletedTopicBody = JSON.parse(deletedTopic.content[0].text);
+  const restoredTopic = await client.callTool({
+    name: "restore_trash",
+    arguments: { id: deletedTopicBody.trash.id, expectedHash: metadataBody.hash, description: "Restored the protocol verification topic." }
+  });
+  assert.equal(restoredTopic.isError, false, JSON.stringify(restoredTopic));
 });

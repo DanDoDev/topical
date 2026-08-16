@@ -73,16 +73,53 @@ test("SQLite FTS5 reports deterministic pre-upgrade relevance metrics and known 
 
   assert.deepEqual(evaluation.metrics, {
     cases: RELEVANCE_EVALUATION_CASES.length,
-    positiveCases: 15,
-    negativeCases: 5,
+    positiveCases: 18,
+    negativeCases: 2,
     firstResultAccuracy: 1,
     negativeAccuracy: 1,
     meanReciprocalRank: 1,
     recallAt3: 1,
-    strictHitRate: 0.7,
-    fallbackRate: 0.3,
+    strictHitRate: 0.8,
+    fallbackRate: 0.15,
+    expandedHitRate: 0.05,
     falsePositiveRate: 0
   });
+});
+
+test("SQLite FTS5 exposes conservative edit expansions only after exact passes are empty", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "topical-sqlite-expansion-"));
+  const index = new SqliteSearchIndex(root);
+  t.after(() => index.close());
+  await index.rebuild(relevanceSnapshot());
+
+  const expanded = await queryWithRelaxedFallback(index, { query: "projet validation", limit: 10 });
+  assert.equal(expanded.matchMode, SEARCH_MATCH_MODE.EXPANDED);
+  assert.deepEqual(expanded.expansions, [
+    { from: "projet", to: "projets", distance: 1 },
+    { from: "validation", to: "validations", distance: 1 }
+  ]);
+  assert.equal(expanded.topics[0].topic, "morphology-reference");
+
+  const exact = await queryWithRelaxedFallback(index, { query: "projets validations", limit: 10 });
+  assert.equal(exact.matchMode, SEARCH_MATCH_MODE.STRICT);
+  assert.equal(exact.expansions, undefined);
+});
+
+test("SQLite FTS5 explains exact titles and same-file versus distributed term evidence", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "topical-sqlite-explanations-"));
+  const index = new SqliteSearchIndex(root);
+  t.after(() => index.close());
+  await index.rebuild(relevanceSnapshot());
+
+  const title = await queryWithRelaxedFallback(index, { query: "Solar Archive Blueprint", limit: 10 });
+  assert.equal(title.topics[0].topic, "solar-archive-blueprint");
+  assert.equal(title.topics[0].exactTitle, true);
+
+  const evidence = await queryWithRelaxedFallback(index, { query: "amber falcon", limit: 10 });
+  assert.equal(evidence.topics[0].termCohesion, "same_file");
+  const distributed = evidence.topics.find((topic) => topic.topic === "distributed-evidence");
+  assert.equal(distributed.termCohesion, "distributed");
+  assert.deepEqual(distributed.files.map((file) => file.matchedTerms.sort()).sort(), [["amber"], ["falcon"]]);
 });
 
 test("SQLite FTS5 reads do not change the cache database", async (t) => {

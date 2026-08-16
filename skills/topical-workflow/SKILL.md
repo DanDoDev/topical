@@ -20,8 +20,11 @@ When the user says to start or create a topical, interpret that as a request to 
 
 1. Call `get_topic_overview` after selecting a topic.
 2. Read only the relevant Markdown files with `read_topic_file`.
-3. For a modification based on a prior read, pass that file hash as `expectedHash` to `update_topic_file`.
-4. Supply a concise description for every mutation.
+3. Before proposing or adding tags, call `list_tags` and prefer a small number of recurring taxonomy facets. Zero tags is normal; warnings are advisory and never authorize automatic cleanup.
+4. For a file or metadata modification, pass the reviewed file hash as `expectedHash`; stale writes return a structured `CONFLICT` error.
+5. Before deleting a file or topic, read the reviewed content and pass its hash as `expectedHash`; use `list_trash` and `restore_trash` for explicit recovery.
+6. Supply a concise description for every mutation.
+7. Follow opaque `page.nextCursor` values for additional topic, tag, history, trash, or publication results instead of assuming one response is complete.
 
 Do not ask for a filesystem path merely to locate existing Topical notes. If Topical MCP tools are unavailable, say that clearly and then request an alternative.
 
@@ -34,6 +37,7 @@ If Topical is enabled but its tools are missing or the connection closes during 
 3. Topical v0.4 requires Node 24.x. Do not rely on a desktop or IDE host resolving `node` through an interactive NVM shell; configure the absolute executable returned by `nvm which 24`.
 4. If dependencies or `better-sqlite3` fail to load, activate Node 24 and run `npm ci` in the Topical checkout.
 5. Restart the MCP host after correcting its configuration, then retry `search_topics` or `list_topics`.
+6. After reconnecting, call `get_system_health` to verify the catalogue and disposable SQLite cache are ready.
 
 Read-only terminal diagnostics are allowed for recovery. Do not edit the Topical topic store directly to bypass an unavailable MCP.
 

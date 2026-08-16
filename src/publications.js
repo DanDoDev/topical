@@ -3,24 +3,12 @@ import { lstat, mkdir, readFile, realpath, rename, stat, writeFile } from "node:
 import os from "node:os";
 import path from "node:path";
 
-import { TopicalError } from "./store.js";
-
-const MAX_MARKDOWN_BYTES = 5 * 1024 * 1024;
+import { conflictError, TopicalError } from "./errors.js";
+import { assertDescription, assertMarkdown } from "./normalization.js";
+import { paginate } from "./pagination.js";
 
 const now = () => new Date().toISOString();
 const hash = (value) => createHash("sha256").update(value).digest("hex");
-
-function assertDescription(description) {
-  if (typeof description !== "string" || description.trim().length < 3) {
-    throw new TopicalError("A short, one-sentence description is required for every change.");
-  }
-}
-
-function assertMarkdownSize(content) {
-  if (typeof content !== "string" || Buffer.byteLength(content, "utf8") > MAX_MARKDOWN_BYTES) {
-    throw new TopicalError("Markdown content cannot exceed 5 MiB per file.");
-  }
-}
 
 function assertAlias(alias) {
   if (!/^[a-z0-9][a-z0-9-]*$/.test(alias || "")) {
@@ -245,7 +233,7 @@ export class PublicationStore {
   async publishDocument({ topic, sourceFiles = ["context.md"], destinationAlias, destinationPath, content, label, description }) {
     return this.#serial(async () => {
       assertDescription(description);
-      assertMarkdownSize(content);
+      assertMarkdown(content);
       const sources = await this.#sources(topic, sourceFiles);
       const destination = await this.#destination(destinationAlias, destinationPath, { create: true });
       if (await exists(destination.target)) throw new TopicalError("Destination already exists. Use update_publication after reviewing its current hash.");
@@ -278,15 +266,18 @@ export class PublicationStore {
     });
   }
 
-  async listPublications({ topic, includeArchived = false } = {}) {
+  async listPublications({ topic, includeArchived = false, cursor, limit = 50 } = {}) {
     const registry = await this.#registry();
-    const entries = registry.publications.filter((record) => (!topic || record.topic === topic) && (includeArchived || !record.archivedAt));
+    const entries = registry.publications
+      .filter((record) => (!topic || record.topic === topic) && (includeArchived || !record.archivedAt))
+      .sort((left, right) => right.publishedAt.localeCompare(left.publishedAt) || left.id.localeCompare(right.id));
+    const page = paginate(entries, { cursor, limit, maxLimit: 100 });
     const results = [];
-    for (const entry of entries) {
+    for (const entry of page.items) {
       const record = await this.#readRecord(entry.id);
       results.push({ id: record.id, topic: record.topic, label: record.label, destination: record.destination, publishedAt: record.publishedAt, archivedAt: record.archivedAt, ...(await this.#status(record)) });
     }
-    return results;
+    return { publications: results, page: page.page };
   }
 
   async getPublicationStatus({ id }) {
@@ -309,7 +300,7 @@ export class PublicationStore {
   async updatePublication({ id, content, expectedTargetHash, sourceFiles, description }) {
     return this.#serial(async () => {
       assertDescription(description);
-      assertMarkdownSize(content);
+      assertMarkdown(content);
       const record = await this.#readRecord(id);
       if (record.archivedAt) throw new TopicalError("Archived publication records cannot be updated.");
       const destination = await this.#destination(record.destination.alias, record.destination.path, { create: false });
@@ -317,7 +308,11 @@ export class PublicationStore {
       const currentContent = await readFile(destination.target, "utf8");
       const currentHash = hash(currentContent);
       if (!expectedTargetHash || expectedTargetHash !== currentHash) {
-        throw new TopicalError("Destination changed since it was read. Read the publication and reconcile before updating.");
+        throw conflictError("Destination changed since it was read. Read the publication and reconcile before updating.", {
+          id,
+          expectedTargetHash,
+          currentTargetHash: currentHash
+        });
       }
       const sources = await this.#sources(record.topic, sourceFiles || record.sourceFiles.map((source) => source.path));
       const timestamp = now();

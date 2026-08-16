@@ -48,6 +48,7 @@ export async function evaluateRelevance(search, cases) {
       recallAt3: rounded(positive.reduce((sum, outcome) => sum + outcome.recallAt3, 0) / positive.length),
       strictHitRate: rounded(outcomes.filter((outcome) => outcome.actualMode === "strict").length / outcomes.length),
       fallbackRate: rounded(outcomes.filter((outcome) => outcome.actualMode === "relaxed").length / outcomes.length),
+      expandedHitRate: rounded(outcomes.filter((outcome) => outcome.actualMode === "expanded").length / outcomes.length),
       falsePositiveRate: rounded(returnedCount ? falsePositiveCount / returnedCount : 0)
     }
   };
