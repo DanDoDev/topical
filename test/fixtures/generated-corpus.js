@@ -3,6 +3,7 @@ import path from "node:path";
 
 export const BENCHMARK_DOCUMENT_COUNTS = Object.freeze([100, 1_000, 10_000]);
 export const BENCHMARK_FIXTURE_ID = "generated-corpus-v1";
+export const BENCHMARK_TOPIC_STRESS = Object.freeze({ documentCount: 1_000, documentsPerTopic: 1, topicCount: 1_000 });
 
 function contextMarkdown(topicNumber) {
   const french = topicNumber % 5 === 0;
@@ -20,15 +21,18 @@ function supportingMarkdown(topicNumber, fileNumber) {
   return `# Recovery procedure ${fileNumber}\n\nBackup recovery and cleanup steps preserve publication independence and runbook records. Document ${topicNumber}-${fileNumber}.\n`;
 }
 
-export function generateBenchmarkFixture(documentCount) {
+export function generateBenchmarkFixture(documentCount, { documentsPerTopic = 100 } = {}) {
   if (!BENCHMARK_DOCUMENT_COUNTS.includes(documentCount)) {
     throw new RangeError(`documentCount must be one of ${BENCHMARK_DOCUMENT_COUNTS.join(", ")}.`);
   }
-  const topicCount = Math.ceil(documentCount / 100);
+  if (!Number.isInteger(documentsPerTopic) || documentsPerTopic < 1 || documentsPerTopic > 100) {
+    throw new RangeError("documentsPerTopic must be an integer from 1 through 100.");
+  }
+  const topicCount = Math.ceil(documentCount / documentsPerTopic);
   let remaining = documentCount;
   const topics = [];
   for (let topicNumber = 1; topicNumber <= topicCount; topicNumber += 1) {
-    const filesInTopic = Math.min(100, remaining);
+    const filesInTopic = Math.min(documentsPerTopic, remaining);
     const id = `benchmark-topic-${String(topicNumber).padStart(3, "0")}`;
     const files = [{ path: "context.md", content: contextMarkdown(topicNumber) }];
     for (let fileNumber = 1; fileNumber < filesInTopic; fileNumber += 1) {
@@ -40,7 +44,7 @@ export function generateBenchmarkFixture(documentCount) {
     topics.push({ id, files });
     remaining -= filesInTopic;
   }
-  return { documentCount, topicCount, topics };
+  return { documentCount, documentsPerTopic, topicCount, topics };
 }
 
 export async function materializeBenchmarkFixture(root, fixture) {
