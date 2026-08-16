@@ -180,6 +180,35 @@ test("reindexes topic metadata after a direct Markdown edit", async () => {
   assert.equal(topic.summary, "Updated manually.");
 });
 
+test("uses one canonical tag identity and parses JSON tags containing commas", async () => {
+  const { root, store } = await createStore();
+  await store.createTopic({
+    title: "Tag identity",
+    summary: "Canonical tag fixture.",
+    tags: [" Café Ops ", "café   ops", "cafe ops", "alpha, beta"],
+    description: "Created the canonical tag fixture."
+  });
+  const [topic] = await store.listTopics({ tags: ["CAFÉ OPS"] });
+  assert.deepEqual(topic.tags, ["Café Ops", "cafe ops", "alpha, beta"]);
+  assert.equal((await store.listTopics({ tags: ["cafe ops"] })).length, 1);
+  assert.equal((await store.searchTopics({ query: "", tags: ["alpha, beta"] })).topics.length, 1);
+
+  const contextPath = path.join(root, "tag-identity", "context.md");
+  const context = await readFile(contextPath, "utf8");
+  assert.match(context, /"alpha, beta"/);
+  await store.reindex();
+  assert.deepEqual((await store.listTopics())[0].tags, ["Café Ops", "cafe ops", "alpha, beta"]);
+});
+
+test("search returns bounded analysis for ignored query terms", async () => {
+  const { store } = await createStore();
+  await store.createTopic({ title: "Query analysis", summary: "term1 term2", tags: [], description: "Created the query-analysis fixture." });
+  const query = `${Array.from({ length: 21 }, (_, index) => `term${index + 1}`).join(" ")} TERM1`;
+  const result = await store.searchTopics({ query });
+  assert.equal(result.analysis.retainedTerms.length, 20);
+  assert.deepEqual(result.analysis.ignoredTerms.map((term) => term.reason), ["term_limit", "duplicate"]);
+});
+
 test("rejects symlinks so reads and writes cannot escape TOPICAL_ROOT", async () => {
   const { root, store } = await createStore();
   const outside = await mkdtemp(path.join(os.tmpdir(), "topical-outside-"));

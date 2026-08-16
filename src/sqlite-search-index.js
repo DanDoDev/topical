@@ -4,35 +4,12 @@ import path from "node:path";
 
 import Database from "better-sqlite3";
 
+import { analyzeQuery, canonicalTagKey, normalizeSearchText } from "./normalization.js";
 import { SearchIndex, SEARCH_MATCH_MODE } from "./search-index.js";
 
-export const SEARCH_SCHEMA_VERSION = 2;
+export const SEARCH_SCHEMA_VERSION = 3;
 const CACHE_DIRECTORY = ".topical-cache";
 const CACHE_FILENAME = "search.sqlite";
-const MAX_QUERY_TERMS = 20;
-
-function normalize(value) {
-  return String(value).normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
-}
-
-function normalizeTag(value) {
-  return normalize(value).trim();
-}
-
-function queryTerms(value) {
-  const source = String(value).normalize("NFKC");
-  const tokens = source.match(/[\p{L}\p{N}]+/gu) || [];
-  const seen = new Set();
-  const results = [];
-  for (const token of tokens) {
-    const normalized = normalize(token);
-    if (!normalized || seen.has(normalized)) continue;
-    seen.add(normalized);
-    results.push({ source: token, normalized });
-    if (results.length >= MAX_QUERY_TERMS) break;
-  }
-  return results;
-}
 
 function ftsToken(token) {
   return `"${String(token).replaceAll('"', '""')}"`;
@@ -189,7 +166,7 @@ function insertTopic(database, snapshot) {
 
   const insertTag = database.prepare("INSERT OR IGNORE INTO topic_tags(topic, tag, display_tag) VALUES (?, ?, ?)");
   for (const displayTag of topic.tags || []) {
-    insertTag.run(topic.id, normalizeTag(displayTag), String(displayTag));
+    insertTag.run(topic.id, canonicalTagKey(displayTag), String(displayTag));
   }
 
   const insertRecord = database.prepare(`
@@ -402,18 +379,18 @@ export class SqliteSearchIndex extends SearchIndex {
     let allowed = null;
     const select = database.prepare("SELECT topic FROM topic_tags WHERE tag = ?").pluck();
     for (const tag of tags) {
-      const matches = new Set(select.all(normalizeTag(tag)));
+      const matches = new Set(select.all(canonicalTagKey(tag)));
       allowed = allowed === null ? matches : new Set([...allowed].filter((topic) => matches.has(topic)));
     }
     return allowed || new Set();
   }
 
-  async query({ query, tags = [], limit = 10, matchMode = SEARCH_MATCH_MODE.STRICT }) {
+  async query({ query, analysis, tags = [], limit = 10, matchMode = SEARCH_MATCH_MODE.STRICT }) {
     await this.#inspect();
     const database = this.#requireReady();
     const boundedLimit = Math.max(1, Math.min(Number(limit) || 10, 50));
     const allowed = this.#allowedTopics(tags);
-    const terms = queryTerms(query);
+    const terms = (analysis || analyzeQuery(query)).terms;
     if (!terms.length) {
       const rows = database.prepare(`
         SELECT topic, title, summary, tags_json, updated_at
@@ -488,9 +465,9 @@ export class SqliteSearchIndex extends SearchIndex {
       for (const topic of grouped.values()) {
         if (!topicSets[termIndex].has(topic.topic)) continue;
         const metadataFields = [];
-        if (normalize(topic.title).includes(term.normalized)) metadataFields.push("title");
-        if (normalize(topic.summary).includes(term.normalized)) metadataFields.push("summary");
-        if (topic.tags.some((tag) => normalize(tag).includes(term.normalized))) metadataFields.push("tags");
+        if (normalizeSearchText(topic.title).includes(term.normalized)) metadataFields.push("title");
+        if (normalizeSearchText(topic.summary).includes(term.normalized)) metadataFields.push("summary");
+        if (topic.tags.some((tag) => normalizeSearchText(tag).includes(term.normalized))) metadataFields.push("tags");
         if (pathMatches.has(topic.topic)) metadataFields.push("path");
         if (headingMatches.has(topic.topic)) metadataFields.push("headings");
         if (!metadataFields.length) metadataFields.push("body");
