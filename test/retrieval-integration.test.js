@@ -131,8 +131,8 @@ test("v0.3 JSON term arrays and incompatible cache schemas migrate by rebuilding
   await migrated.initialize();
   const migratedRoot = JSON.parse(await readFile(rootIndexPath, "utf8"));
   const migratedTopic = JSON.parse(await readFile(topicIndexPath, "utf8"));
-  assert.equal(migratedRoot.version, 3);
-  assert.equal(migratedTopic.version, 4);
+  assert.equal(migratedRoot.version, 4);
+  assert.equal(migratedTopic.version, 5);
   assert.ok(migratedRoot.documents.every((document) => !Object.hasOwn(document, "terms")));
   assert.ok(migratedTopic.documents.every((document) => !Object.hasOwn(document, "terms")));
   assert.equal((await migrated.searchTopics({ query: "amethyst migration" })).topics[0]?.topic, "migration-source");
@@ -256,6 +256,8 @@ test("ordinary store reads leave root, topic, and SQLite derived state unchanged
   const capture = async () => Promise.all(paths.map(async (target) => ({ content: await readFile(target), modified: (await stat(target)).mtimeMs })));
   const before = await capture();
   await store.readTopicFile({ topic: "stable-reads" });
+  await store.readRootCatalogue();
+  await store.readTopicCatalogue({ topic: "stable-reads" });
   await store.getTopicOverview({ topic: "stable-reads" });
   await store.listTopics();
   await store.searchTopics({ query: "saffron query" });

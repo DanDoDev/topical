@@ -39,6 +39,8 @@ export class TopicalApplication {
   getRevision() { return this.store.getRevision(); }
   createTopic(input) { return this.store.createTopic(input); }
   readTopicFile(input) { return this.store.readTopicFile(input); }
+  readRootCatalogue(input) { return this.store.readRootCatalogue(input); }
+  readTopicCatalogue(input) { return this.store.readTopicCatalogue(input); }
   getTopicOverview(input) { return this.store.getTopicOverview(input); }
   updateTopicFile(input) { return this.store.updateTopicFile(input); }
   createTopicFile(input) { return this.store.createTopicFile(input); }

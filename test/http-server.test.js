@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -128,6 +128,34 @@ test("HTTP route validation is bounded and hides unexpected internals", async (t
   assert.equal(missing.json().error.code, "TOPICAL_ERROR");
 });
 
+test("HTTP exposes only allowlisted read-only derived catalogue inspectors", async (t) => {
+  const { server, application, root } = await createServer();
+  t.after(async () => { await server.close(); await application.close(); });
+  await application.createTopic({ title: "Catalogue Fixture", initialContent: "# Current notes", description: "Created the catalogue fixture." });
+  const rootBefore = await readFile(path.join(root, "index.json"), "utf8");
+  const topicBefore = await readFile(path.join(root, "catalogue-fixture", "index.json"), "utf8");
+
+  const rootResponse = await server.inject({ method: "GET", url: "/api/v1/catalogues/root?view=raw", headers: { host } });
+  const topicResponse = await server.inject({ method: "GET", url: "/api/v1/catalogues/topic?topic=catalogue-fixture&view=raw", headers: { host } });
+  const renderedResponse = await server.inject({ method: "GET", url: "/api/v1/catalogues/root?view=rendered", headers: { host } });
+  assert.equal(rootResponse.statusCode, 200);
+  assert.equal(topicResponse.statusCode, 200);
+  assert.equal(rootResponse.headers["cache-control"], "no-store");
+  assert.equal(rootResponse.json().raw, rootBefore);
+  assert.equal(topicResponse.json().raw, topicBefore);
+  assert.equal(renderedResponse.json().data.topics[0].id, "catalogue-fixture");
+  assert.equal(rootResponse.json().data, undefined);
+  assert.equal(renderedResponse.json().raw, undefined);
+  assert.deepEqual(await Promise.all([
+    readFile(path.join(root, "index.json"), "utf8"),
+    readFile(path.join(root, "catalogue-fixture", "index.json"), "utf8")
+  ]), [rootBefore, topicBefore]);
+
+  const traversal = await server.inject({ method: "GET", url: "/api/v1/catalogues/topic?topic=../outside", headers: { host } });
+  assert.equal(traversal.statusCode, 400);
+  assert.doesNotMatch(traversal.body, new RegExp(root.replaceAll("/", "\\/")));
+});
+
 test("HTTP soft deletion and restoration remain hash-reviewed and recoverable", async (t) => {
   const { server, application } = await createServer();
   t.after(async () => { await server.close(); await application.close(); });
@@ -167,4 +195,9 @@ test("bundled static serving does not expose files outside ui-dist", async (t) =
     const response = await server.inject({ method: "GET", url, headers: { host } });
     assert.doesNotMatch(response.body, /"name"\s*:\s*"topical-mcp"|\[core\]/);
   }
+
+  const missingAsset = await server.inject({ method: "GET", url: "/assets/missing-editor.js", headers: { host } });
+  assert.equal(missingAsset.statusCode, 404);
+  assert.match(missingAsset.headers["content-type"], /^text\/plain/);
+  assert.doesNotMatch(missingAsset.body, /<html|<script/i);
 });
