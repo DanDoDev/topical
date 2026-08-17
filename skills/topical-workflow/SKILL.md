@@ -35,7 +35,9 @@ If Topical is enabled but its tools are missing or the connection closes during 
 1. Inspect the MCP startup stderr. Adding the topic directory as a workspace root does not configure or change the MCP runtime.
 2. Run the configured executable and server path with `--doctor --json`, forwarding the same `TOPICAL_ROOT` environment.
 3. Topical v0.4 requires Node 24.x. Do not rely on a desktop or IDE host resolving `node` through an interactive NVM shell; configure the absolute executable returned by `nvm which 24`.
-4. If dependencies or `better-sqlite3` fail to load, activate Node 24 and run `npm ci` in the Topical checkout.
+4. If dependencies or `better-sqlite3` fail to load, identify the installation form:
+   - Source checkout: activate Node 24 and run `npm ci` in the Topical checkout.
+   - Prebuilt install: under Node 24, reinstall a current tarball with `npm install --global ./topical-mcp-*.tgz --omit=dev`. Use the npm tarball produced by `npm pack`, not GitHub's automatic source-code archive; the npm tarball contains the compiled `ui-dist` GUI.
 5. Restart the MCP host after correcting its configuration, then retry `search_topics` or `list_topics`.
 6. After reconnecting, call `get_system_health` to verify the catalogue and disposable SQLite cache are ready.
 

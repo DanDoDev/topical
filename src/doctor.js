@@ -6,6 +6,8 @@ import process from "node:process";
 
 import { REQUIRED_NODE_MAJOR, supportsNode } from "./startup.js";
 
+const DEPENDENCY_INSTALL_FIX = "Source checkout: activate Node 24 and run `npm ci`. Prebuilt install: use a current npm tarball and run `npm install --global ./topical-mcp-*.tgz --omit=dev`.";
+
 async function pathExists(target) {
   try {
     await lstat(target);
@@ -40,7 +42,7 @@ async function inspectDependencies(checks) {
     await import("@modelcontextprotocol/sdk/server/mcp.js");
     checks.push(check("MCP SDK", "pass", "The MCP server dependency loads under this runtime."));
   } catch (error) {
-    checks.push(check("MCP SDK", "fail", error.message, "Activate Node 24 and run `npm ci` in the Topical checkout."));
+    checks.push(check("MCP SDK", "fail", error.message, DEPENDENCY_INSTALL_FIX));
   }
 
   try {
@@ -50,7 +52,7 @@ async function inspectDependencies(checks) {
       const sqliteVersion = database.prepare("SELECT sqlite_version()").pluck().get();
       const fts5 = database.prepare("SELECT sqlite_compileoption_used('ENABLE_FTS5')").pluck().get() === 1;
       if (!fts5) {
-        checks.push(check("SQLite FTS5", "fail", `SQLite ${sqliteVersion} loaded without FTS5.`, "Run `npm ci` under Node 24 to install Topical's supported better-sqlite3 build."));
+        checks.push(check("SQLite FTS5", "fail", `SQLite ${sqliteVersion} loaded without FTS5.`, `${DEPENDENCY_INSTALL_FIX} Topical requires an FTS5-enabled better-sqlite3 build.`));
         return null;
       }
       checks.push(check("SQLite FTS5", "pass", `better-sqlite3 loaded SQLite ${sqliteVersion} with FTS5.`));
@@ -59,7 +61,7 @@ async function inspectDependencies(checks) {
       database.close();
     }
   } catch (error) {
-    checks.push(check("SQLite FTS5", "fail", error.message, "Activate Node 24 and run `npm ci`; native modules must be installed under the runtime that launches Topical."));
+    checks.push(check("SQLite FTS5", "fail", error.message, `${DEPENDENCY_INSTALL_FIX} Native modules must be installed under the runtime that launches Topical.`));
     return null;
   }
 }

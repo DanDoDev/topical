@@ -26,5 +26,6 @@ test("runtime preflight rejects an unsupported Node before native imports", () =
   assert.equal(supported, false);
   assert.match(output, /Node\.js 24\.x is required; found v20\.19\.0/);
   assert.match(output, /npm ci/);
+  assert.match(output, /npm install --global \.\/topical-mcp-\*\.tgz --omit=dev/);
   assert.match(output, /nvm which 24/);
 });

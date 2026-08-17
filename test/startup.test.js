@@ -15,13 +15,15 @@ test("the dependency-free startup guard gives an actionable Node 24 recovery", (
   const message = formatNodeVersionError("v20.19.0");
   assert.match(message, /Node\.js 24\.x is required; found v20\.19\.0/);
   assert.match(message, /npm ci/);
+  assert.match(message, /npm install --global \.\/topical-mcp-\*\.tgz --omit=dev/);
   assert.match(message, /nvm which 24/);
   assert.match(message, /workspace folder does not change the MCP runtime/);
 });
 
 test("startup failures explain dependency and configuration recovery", () => {
   const nativeError = Object.assign(new Error("better_sqlite3.node uses a different NODE_MODULE_VERSION"), { code: "ERR_DLOPEN_FAILED" });
-  assert.match(formatStartupError(nativeError), /activate Node 24, run `npm ci`/);
+  assert.match(formatStartupError(nativeError), /npm ci/);
+  assert.match(formatStartupError(nativeError), /npm install --global \.\/topical-mcp-\*\.tgz --omit=dev/);
   assert.match(formatStartupError(new Error("TOPICAL_ROOT is required.")), /set TOPICAL_ROOT/);
   assert.match(formatStartupError(new Error("The installed SQLite binding does not include FTS5.")), /FTS5-enabled better-sqlite3/);
 });
