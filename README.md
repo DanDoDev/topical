@@ -254,6 +254,45 @@ npm audit --omit=dev
 
 The first command runs the Node/API suite and focused client tests after rebuilding the UI. The Playwright suite starts an isolated loopback server and exercises the packaged browser app in Chromium.
 
+## Installing a prebuilt tarball
+
+An npm release tarball contains the already-built management UI in `ui-dist`. The target machine does not need React, Vite, Vitest, Playwright, or other development packages.
+
+On the build machine:
+
+```bash
+npm ci
+npm pack
+```
+
+This produces a file such as `topical-mcp-0.4.0.tgz`. Transfer that file to the target machine, then install only the runtime dependencies:
+
+```bash
+npm install --global ./topical-mcp-0.4.0.tgz --omit=dev
+```
+
+Start the GUI server:
+
+```bash
+export TOPICAL_ROOT=/absolute/path/to/topical-files
+topical ui --no-open
+```
+
+Then visit [http://127.0.0.1:2223](http://127.0.0.1:2223). The installed `topical` executable starts one loopback Fastify process that serves the precompiled HTML, CSS, and JavaScript from `ui-dist`, exposes the local management API, and reads and writes the configured `TOPICAL_ROOT`.
+
+The MCP server runs separately from the same installation and can use the same root:
+
+```bash
+TOPICAL_ROOT=/absolute/path/to/topical-files topical mcp
+```
+
+Important details:
+
+- Use the npm tarball produced by `npm pack`, not GitHub's automatic source-code archive. The npm tarball contains the compiled GUI.
+- The tarball still installs production dependencies from the configured npm registry; it is not a fully self-contained executable.
+- `better-sqlite3` must install successfully for the target operating system and Node 24.
+- Use a current tarball. Older builds may include the retired runtime `open` to `default-browser` dependency chain.
+
 ## License
 
 Topical is available under the [MIT License](LICENSE).
