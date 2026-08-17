@@ -4,6 +4,8 @@ import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
+import { DEFAULT_UI_PORT } from "../src/config.js";
+
 const run = promisify(execFile);
 const entry = path.resolve("src/server.js");
 
@@ -12,6 +14,8 @@ test("CLI documents MCP, doctor, and loopback UI commands", async () => {
   assert.equal(stderr, "");
   assert.match(stdout, /topical \[mcp\|ui\|doctor\]/);
   assert.match(stdout, /ui \[--port <number>\] \[--no-open\]/);
+  assert.match(stdout, /default port: 2223/);
+  assert.equal(DEFAULT_UI_PORT, 2223);
 });
 
 test("CLI rejects invalid UI ports before initializing the store", async () => {

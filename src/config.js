@@ -1,6 +1,8 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
+export const DEFAULT_UI_PORT = 2223;
+
 export async function loadEnvironment({ cwd = process.cwd(), env = process.env } = {}) {
   const values = { ...env };
   try {

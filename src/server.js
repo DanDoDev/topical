@@ -10,7 +10,7 @@ function help() {
     "",
     "Without a command, starts the Topical MCP server over stdio.",
     "doctor [--json] performs read-only startup, dependency, path, and cache checks.",
-    "ui [--port <number>] [--no-open] starts the loopback-only management UI."
+    "ui [--port <number>] [--no-open] starts the loopback-only management UI (default port: 2223)."
   ].join("\n");
 }
 
@@ -52,10 +52,10 @@ async function run() {
 
     if (command === "ui") {
       const portIndex = commandArgs.indexOf("--port");
-      const port = portIndex === -1 ? 0 : Number(commandArgs[portIndex + 1]);
+      const { DEFAULT_UI_PORT, loadTopicalConfig } = await import("./config.js");
+      const port = portIndex === -1 ? DEFAULT_UI_PORT : Number(commandArgs[portIndex + 1]);
       if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error("--port must be an integer from 0 to 65535.");
       const { TopicalApplication } = await import("./application.js");
-      const { loadTopicalConfig } = await import("./config.js");
       const { createHttpServer } = await import("./http-server.js");
       const application = new TopicalApplication(await loadTopicalConfig());
       await application.initialize();

@@ -106,10 +106,10 @@ From a source checkout with Node 24 active and `TOPICAL_ROOT` configured, run:
 npm run ui
 ```
 
-The pre-run step builds the bundled client, starts one local process on `127.0.0.1`, chooses an available port, and opens the browser. Use a fixed loopback port or suppress browser launch when needed:
+The pre-run step builds the bundled client, starts one local process at `http://127.0.0.1:2223`, and opens the browser. Override the loopback port or suppress browser launch when needed:
 
 ```bash
-npm run ui -- --port 43110
+npm run ui -- --port 3333
 npm run ui -- --no-open
 ```
 
