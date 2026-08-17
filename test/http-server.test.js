@@ -96,6 +96,25 @@ test("HTTP routes preserve application results, audit descriptions, and conflict
   assert.equal(history.json().events[0].description, "Updated through the browser editor.");
 });
 
+test("HTTP revision and topic reads notice mutations from another application", async (t) => {
+  const { server, application, root } = await createServer();
+  const writer = new TopicalApplication({ root });
+  await writer.initialize();
+  t.after(async () => { await server.close(); await application.close(); await writer.close(); });
+
+  const before = await server.inject({ method: "GET", url: "/api/v1/revision", headers: { host } });
+  await writer.createTopic({
+    title: "External HTTP Topic",
+    initialContent: "# Live\n\nAppears without restarting the UI server.",
+    description: "Created through a second application instance."
+  });
+  const after = await server.inject({ method: "GET", url: "/api/v1/revision", headers: { host } });
+  const topics = await server.inject({ method: "GET", url: "/api/v1/topics", headers: { host } });
+
+  assert.notEqual(after.json().revision, before.json().revision);
+  assert.ok(topics.json().topics.some((topic) => topic.id === "external-http-topic"));
+});
+
 test("HTTP route validation is bounded and hides unexpected internals", async (t) => {
   const { server, application } = await createServer();
   t.after(async () => { await server.close(); await application.close(); });

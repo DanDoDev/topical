@@ -16,6 +16,34 @@ await application.createTopic({
   description: "Created the browser-test fixture."
 });
 const { server } = createHttpServer({ application });
+server.post("/api/v1/test-external-topic", async () => {
+  const external = new TopicalApplication({ root });
+  await external.initialize();
+  try {
+    return await external.createTopic({
+      title: "External Browser Topic",
+      summary: "Created by another process while the browser remains open.",
+      tags: ["live-refresh"],
+      initialContent: "# Appeared live\n\nNo browser or server refresh was required.",
+      description: "Created the cross-process browser fixture."
+    });
+  } finally { await external.close(); }
+});
+server.post("/api/v1/test-external-file", async () => {
+  const external = new TopicalApplication({ root });
+  await external.initialize();
+  try {
+    const current = await external.readTopicFile({ topic: "browser-fixture", filePath: "context.md" });
+    return await external.updateTopicFile({
+      topic: "browser-fixture",
+      filePath: "context.md",
+      mode: "replace",
+      content: `${current.content}\n\nChanged outside the browser.`,
+      expectedHash: current.hash,
+      description: "Changed the file through another process."
+    });
+  } finally { await external.close(); }
+});
 await server.listen({ host: "127.0.0.1", port: 43111 });
 process.stdout.write("Topical E2E server ready\n");
 

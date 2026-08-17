@@ -97,6 +97,31 @@ test("ordinary reads do not mutate root or topic derived state", async () => {
   assert.deepEqual(after, before);
 });
 
+test("long-lived stores observe external topic and search-index replacements", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "topical-shared-store-test-"));
+  const reader = new TopicalStore(root);
+  const writer = new TopicalStore(root);
+  await reader.initialize();
+  await writer.initialize();
+  t.after(async () => { await Promise.all([reader.close(), writer.close()]); });
+
+  const before = await reader.getRevision();
+  await writer.createTopic({
+    title: "External Penguin",
+    summary: "Created by another Topical process.",
+    tags: ["wildlife"],
+    initialContent: "# Colony\n\nEmperor penguins gather on sea ice.",
+    description: "Created the external-process fixture."
+  });
+
+  const topics = await reader.listTopics();
+  const search = await reader.searchTopics({ query: "emperor penguins" });
+  const after = await reader.getRevision();
+  assert.ok(topics.topics.some((topic) => topic.id === "external-penguin"));
+  assert.equal(search.topics[0]?.topic, "external-penguin");
+  assert.notEqual(after.revision, before.revision);
+});
+
 test("missing derived indexes can be rebuilt from Markdown without data loss", async () => {
   const { root, store } = await createStore();
   await store.createTopic({

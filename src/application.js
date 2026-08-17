@@ -36,6 +36,7 @@ export class TopicalApplication {
   listTags(input) { return this.store.listTags(input); }
   listHistory(input) { return this.store.listHistory(input); }
   getSystemHealth() { return this.store.getSystemHealth(); }
+  getRevision() { return this.store.getRevision(); }
   createTopic(input) { return this.store.createTopic(input); }
   readTopicFile(input) { return this.store.readTopicFile(input); }
   getTopicOverview(input) { return this.store.getTopicOverview(input); }

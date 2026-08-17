@@ -153,6 +153,11 @@ async function readJson(target, fallback) {
   try { return JSON.parse(await readFile(target, "utf8")); } catch { return fallback; }
 }
 
+async function fileStamp(target) {
+  const details = await stat(target, { bigint: true });
+  return [details.dev, details.ino, details.size, details.mtimeNs].join(":");
+}
+
 async function writeAtomic(root, target, content) {
   await assertSafeFilesystemPath(root, target);
   await mkdir(path.dirname(target), { recursive: true });
@@ -247,7 +252,10 @@ function headingList(markdown) {
 export class TopicalStore {
   #queue = Promise.resolve();
   #rootIndexCache;
+  #rootIndexStamp;
+  #rootRefreshPromise;
   #searchIndex;
+  #searchIndexIdentity;
   #initialized = false;
   #initializePromise;
 
@@ -284,12 +292,14 @@ export class TopicalStore {
       const emptyIndex = { version: ROOT_INDEX_VERSION, updatedAt: now(), topics: [], documents: [], recentActions: [] };
       await writeAtomic(this.root, indexPath, JSON.stringify(emptyIndex, null, 2) + "\n");
       this.#rootIndexCache = emptyIndex;
+      this.#rootIndexStamp = await fileStamp(indexPath);
       rootNeedsRebuild = true;
     } else {
       const existingIndex = await readJson(indexPath, null);
       rootNeedsRebuild = !existingIndex || existingIndex.version !== ROOT_INDEX_VERSION;
       if (!rootNeedsRebuild) {
         this.#rootIndexCache = existingIndex;
+        this.#rootIndexStamp = await fileStamp(indexPath);
         for (const topic of existingIndex.topics || []) {
           if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(topic.id)) { rootNeedsRebuild = true; break; }
           const topicIndexPath = path.join(this.root, topic.id, "index.json");
@@ -301,6 +311,7 @@ export class TopicalStore {
     }
     this.#searchIndex = new SqliteSearchIndex(this.root);
     const searchHealth = await this.#searchIndex.health();
+    if (searchHealth.status === "ready") this.#searchIndexIdentity = await this.#currentSearchIdentity();
     this.#initialized = true;
     try {
       if (rootNeedsRebuild || searchHealth.status !== "ready") await this.#reindexUnlocked();
@@ -315,6 +326,8 @@ export class TopicalStore {
     await this.#searchIndex?.close();
     this.#initialized = false;
     this.#rootIndexCache = undefined;
+    this.#rootIndexStamp = undefined;
+    this.#searchIndexIdentity = undefined;
   }
 
   async #serial(operation) {
@@ -325,16 +338,30 @@ export class TopicalStore {
 
   async #getRootIndex() {
     await this.initialize();
-    if (this.#rootIndexCache) return this.#rootIndexCache;
     const indexPath = path.join(this.root, "index.json");
     await assertSafeFilesystemPath(this.root, indexPath);
-    const index = await readJson(indexPath, { version: ROOT_INDEX_VERSION, updatedAt: now(), topics: [], documents: [], recentActions: [] });
-    index.version = ROOT_INDEX_VERSION;
-    index.topics = Array.isArray(index.topics) ? index.topics : [];
-    index.documents = Array.isArray(index.documents) ? index.documents : [];
-    index.recentActions = Array.isArray(index.recentActions) ? index.recentActions : [];
-    this.#rootIndexCache = index;
-    return index;
+    const currentStamp = await fileStamp(indexPath);
+    if (this.#rootIndexCache && currentStamp === this.#rootIndexStamp) return this.#rootIndexCache;
+    if (this.#rootRefreshPromise) return this.#rootRefreshPromise;
+    this.#rootRefreshPromise = (async () => {
+      const observedStamp = await fileStamp(indexPath);
+      if (this.#rootIndexCache && observedStamp === this.#rootIndexStamp) return this.#rootIndexCache;
+      const index = await readJson(indexPath, { version: ROOT_INDEX_VERSION, updatedAt: now(), topics: [], documents: [], recentActions: [] });
+      index.version = ROOT_INDEX_VERSION;
+      index.topics = Array.isArray(index.topics) ? index.topics : [];
+      index.documents = Array.isArray(index.documents) ? index.documents : [];
+      index.recentActions = Array.isArray(index.recentActions) ? index.recentActions : [];
+      const previousStamp = this.#rootIndexStamp;
+      this.#rootIndexCache = index;
+      this.#rootIndexStamp = observedStamp;
+      if (previousStamp && previousStamp !== observedStamp) await this.#refreshSearchIndexIfReplaced();
+      return index;
+    })();
+    try {
+      return await this.#rootRefreshPromise;
+    } finally {
+      this.#rootRefreshPromise = null;
+    }
   }
 
   async #writeRootIndex(index) {
@@ -343,9 +370,35 @@ export class TopicalStore {
     index.topics = Array.isArray(index.topics) ? index.topics : [];
     index.documents = Array.isArray(index.documents) ? index.documents : [];
     index.recentActions = Array.isArray(index.recentActions) ? index.recentActions : [];
-    await writeAtomic(this.root, path.join(this.root, "index.json"), JSON.stringify(index, null, 2) + "\n");
+    const indexPath = path.join(this.root, "index.json");
+    await writeAtomic(this.root, indexPath, JSON.stringify(index, null, 2) + "\n");
     this.#rootIndexCache = index;
+    this.#rootIndexStamp = await fileStamp(indexPath);
     return index;
+  }
+
+  async #currentSearchIdentity() {
+    try {
+      const details = await stat(path.join(this.root, ".topical-cache", "search.sqlite"), { bigint: true });
+      return [details.dev, details.ino].join(":");
+    } catch {
+      return null;
+    }
+  }
+
+  async #refreshSearchIndexIfReplaced() {
+    const identity = await this.#currentSearchIdentity();
+    if (!identity || identity === this.#searchIndexIdentity) return;
+    const replacement = new SqliteSearchIndex(this.root);
+    const health = await replacement.health();
+    if (health.status !== "ready") {
+      await replacement.close();
+      return;
+    }
+    const previous = this.#searchIndex;
+    this.#searchIndex = replacement;
+    this.#searchIndexIdentity = identity;
+    await previous?.close();
   }
 
   #topicDirectory(topic) {
@@ -515,6 +568,7 @@ export class TopicalStore {
     topics.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     const rootIndex = { version: ROOT_INDEX_VERSION, updatedAt: now(), topics, documents, recentActions: actions };
     await this.#searchIndex.rebuild({ topics: searchTopics });
+    this.#searchIndexIdentity = await this.#currentSearchIdentity();
     return this.#writeRootIndex(rootIndex);
   }
 
@@ -647,6 +701,11 @@ export class TopicalStore {
       search,
       rebuildRecommended: search.status !== "ready"
     };
+  }
+
+  async getRevision() {
+    await this.#getRootIndex();
+    return { revision: hash(this.#rootIndexStamp || "") };
   }
 
   async listTags({ query = "", cursor, limit = 50 } = {}) {
@@ -998,6 +1057,7 @@ export class TopicalStore {
 
   async searchTopics({ query, tags = [], limit = 10 }) {
     await this.initialize();
+    await this.#getRootIndex();
     const analysis = analyzeQuery(query);
     const sourceQuery = analysis.source;
     const result = await queryWithRelaxedFallback(this.#searchIndex, { query: sourceQuery, analysis, tags: cleanTags(tags), limit });

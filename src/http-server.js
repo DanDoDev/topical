@@ -107,8 +107,10 @@ export function createHttpServer({ application, csrfToken = randomBytes(32).toSt
   server.get("/api/v1/bootstrap", async () => ({
     version: "0.5.0-dev",
     csrfToken,
-    capabilities: ["topics", "search", "editing", "taxonomy", "history", "trash", "publications", "health", "reindex"]
+    ...(await application.getRevision()),
+    capabilities: ["topics", "search", "editing", "taxonomy", "history", "trash", "publications", "health", "reindex", "live-refresh"]
   }));
+  server.get("/api/v1/revision", async () => application.getRevision());
   server.get("/api/v1/topics", endpoint(topicListQuery, (request) => request.query, (input) => application.listTopics(input)));
   server.get("/api/v1/topics/:topic/overview", endpoint(z.object({ topic }), (request) => request.params, (input) => application.getTopicOverview(input)));
   server.get("/api/v1/topic-file", endpoint(readQuery, (request) => request.query, ({ topic, path }) => application.readTopicFile({ topic, filePath: path })));
