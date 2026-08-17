@@ -17,9 +17,9 @@
     "doctor": "node src/server.js --doctor",
     "preflight": "node src/runtime-preflight.js",
     "pretest": "node src/runtime-preflight.js && npm run build:ui",
-    "test": "node --test test/*.test.js && npm run test:ui",
+    "test": "node --test test/*.test.js && vitest run --config ui/vite.config.js",
     "test:server": "node --test test/*.test.js",
-    "test:ui": "node test/run-ui-tests.js",
+    "test:ui": "vitest run --config ui/vite.config.js",
     "pretest:e2e": "node src/runtime-preflight.js && npm run build:ui",
     "test:e2e": "playwright test",
     "pretest:retrieval": "node src/runtime-preflight.js",
@@ -43,8 +43,8 @@
   "devDependencies": {
     "@codemirror/lang-markdown": "^6.3.4",
     "@playwright/test": "^1.56.1",
+    "@testing-library/jest-dom": "^6.8.0",
     "@testing-library/react": "^16.3.0",
-    "@types/node": "^24.10.1",
     "@types/react": "^19.2.2",
     "@types/react-dom": "^19.2.2",
     "@vitejs/plugin-react": "^5.1.0",
@@ -55,7 +55,8 @@
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
     "typescript": "^5.9.3",
-    "vite": "^7.2.2"
+    "vite": "^7.2.2",
+    "vitest": "^4.0.8"
   },
   "license": "MIT",
   "author": "DanDoDev",

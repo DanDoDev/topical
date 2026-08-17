@@ -1,9 +1,9 @@
 import { Component, FormEvent, lazy, ReactNode, Suspense, useEffect, useRef, useState } from "react";
 
-import { ApiClient, ApiError, connectApi, queryString } from "./api.js";
-import { MarkdownView } from "./MarkdownView.js";
+import { ApiClient, ApiError, connectApi, queryString } from "./api";
+import { MarkdownView } from "./MarkdownView";
 
-const MarkdownEditor = lazy(() => import("./MarkdownEditor.js").then((module) => ({ default: module.MarkdownEditor })));
+const MarkdownEditor = lazy(() => import("./MarkdownEditor").then((module) => ({ default: module.MarkdownEditor })));
 
 type View = "topics" | "search" | "tags" | "history" | "trash" | "publications" | "system";
 type Notice = { kind: "error" | "success"; text: string } | null;
