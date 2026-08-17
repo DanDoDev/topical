@@ -186,6 +186,7 @@ function TopicWorkspace({ api, topic, liveRevision, onBack, onChanged, onDirtyCh
   const [showMetadata, setShowMetadata] = useState(false);
   const [showNewFile, setShowNewFile] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<"file" | "topic">();
+  const [showContext, setShowContext] = useState(true);
   const preview = useRef<HTMLDivElement>(null);
   const fileRef = useRef<any>(undefined);
   const draftRef = useRef("");
@@ -263,7 +264,7 @@ function TopicWorkspace({ api, topic, liveRevision, onBack, onChanged, onDirtyCh
   const metadata = overview.data.metadata;
   const contextHash = overview.data.files.find((item: any) => item.path === "context.md")?.hash;
   return (
-    <main className="workspace">
+    <main className={`workspace ${showContext ? "" : "context-hidden"}`}>
       <section className="document-pane">
         <PageHeader eyebrow={<button className="text-button" onClick={onBack}>← Topics</button>} title={metadata.title} subtitle={metadata.summary} actions={<><button onClick={() => setShowMetadata(true)}>Edit details</button><button className={editing ? "" : "primary"} onClick={() => setEditing((value) => !value)}>{editing ? "Read" : "Edit"}</button></>} />
         {notice && <div className={`notice ${notice.kind}`}>{notice.text}</div>}
@@ -275,8 +276,8 @@ function TopicWorkspace({ api, topic, liveRevision, onBack, onChanged, onDirtyCh
         ) : <MarkdownView>{file.content}</MarkdownView>}
         {editing && <div className="save-bar"><input aria-label="Change description" placeholder="Describe this change for the audit history" value={description} onChange={(event) => setDescription(event.target.value)} /><span>{dirty ? "Unsaved changes" : "No changes"}</span><button onClick={() => { setDraft(file.content); setEditing(false); }}>Cancel</button><button className="primary" disabled={!dirty} onClick={save}>Save safely</button></div>}
       </section>
-      <aside className="context-pane">
-        <div className="context-heading"><span>Files</span><button className="icon-button" aria-label="Create supporting file" onClick={() => setShowNewFile(true)}>＋</button></div>
+      {showContext && <aside className="context-pane" aria-label="Topic sidebar">
+        <div className="context-heading"><span>Files</span><div className="context-actions"><button className="icon-button" aria-label="Create supporting file" onClick={() => setShowNewFile(true)}>＋</button><button className="icon-button panel-toggle" aria-label="Hide topic sidebar" title="Hide topic sidebar" onClick={() => setShowContext(false)}>→</button></div></div>
         <div className="file-list">
           {overview.data.files.map((item: any) => <button key={item.path} className={selectedPath === item.path ? "active" : ""} onClick={() => { if (!dirty || window.confirm("Discard the unsaved draft?")) setSelectedPath(item.path); }}><span>◇</span>{item.path}</button>)}
         </div>
@@ -285,7 +286,8 @@ function TopicWorkspace({ api, topic, liveRevision, onBack, onChanged, onDirtyCh
         <TopicHistory api={api} topic={topic} revision={revision + liveRevision} />
         {selectedPath !== "context.md" && <button className="danger subtle" onClick={() => setPendingDelete("file")}>Move file to trash</button>}
         <button className="danger subtle" onClick={() => setPendingDelete("topic")}>Move topic to trash</button>
-      </aside>
+      </aside>}
+      {!showContext && <button className="show-context-button" aria-label="Show topic sidebar" title="Show topic sidebar" onClick={() => setShowContext(true)}><span aria-hidden="true">←</span><span>Topic details</span></button>}
       {conflict && <ConflictDialog conflict={conflict} onClose={() => setConflict(null)} onReload={() => { setFile(conflict.current); setDraft(conflict.current.content); setConflict(null); }} onReview={() => { setFile(conflict.current); setConflict(null); setNotice({ kind: "success", text: "Current version reviewed. Reconcile the draft, then save explicitly." }); }} />}
       {showMetadata && <MetadataDialog api={api} topic={topic} metadata={metadata} expectedHash={contextHash} onClose={() => setShowMetadata(false)} onSaved={() => { setShowMetadata(false); setRevision((value) => value + 1); onChanged(); }} />}
       {showNewFile && <NewFileDialog api={api} topic={topic} onClose={() => setShowNewFile(false)} onCreated={(path: string) => { setShowNewFile(false); setRevision((value) => value + 1); setSelectedPath(path); onChanged(); }} />}

@@ -1,8 +1,25 @@
 import { expect, test } from "@playwright/test";
 
 test("browse, search, edit, and audit through the loopback UI", async ({ page }) => {
+  await page.emulateMedia({ colorScheme: "dark" });
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Topics" })).toBeVisible();
+  const searchContrast = await page.getByLabel("Search Topical").evaluate((input) => {
+    const luminance = (value) => {
+      const channels = value.match(/[\d.]+/g).slice(0, 3).map(Number).map((channel) => {
+        const normalized = channel / 255;
+        return normalized <= 0.03928 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
+      });
+      return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+    };
+    const background = luminance(getComputedStyle(input).backgroundColor);
+    const text = luminance(getComputedStyle(input).color);
+    const placeholder = luminance(getComputedStyle(input, "::placeholder").color);
+    const ratio = (left, right) => (Math.max(left, right) + 0.05) / (Math.min(left, right) + 0.05);
+    return { text: ratio(text, background), placeholder: ratio(placeholder, background) };
+  });
+  expect(searchContrast.text).toBeGreaterThanOrEqual(4.5);
+  expect(searchContrast.placeholder).toBeGreaterThanOrEqual(4.5);
 
   const bootstrap = await page.evaluate(() => fetch("/api/v1/bootstrap").then((response) => response.json()));
   await page.evaluate(async (csrfToken) => {
@@ -18,6 +35,11 @@ test("browse, search, edit, and audit through the loopback UI", async ({ page })
   await page.getByRole("button", { name: /Browser Fixture/ }).click();
 
   await expect(page.getByRole("heading", { name: "Safe reading" })).toBeVisible();
+  await expect(page.getByRole("complementary", { name: "Topic sidebar" })).toBeVisible();
+  await page.getByRole("button", { name: "Hide topic sidebar" }).click();
+  await expect(page.getByRole("complementary", { name: "Topic sidebar" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Show topic sidebar" }).click();
+  await expect(page.getByRole("complementary", { name: "Topic sidebar" })).toBeVisible();
   await expect(page.getByText(/title: "Browser Fixture"/)).toHaveCount(0);
   await expect(page.locator("script").filter({ hasText: "window.__unsafe" })).toHaveCount(0);
 
