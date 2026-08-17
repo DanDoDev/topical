@@ -1,6 +1,7 @@
 import { Component, FormEvent, lazy, ReactNode, Suspense, useEffect, useRef, useState } from "react";
 
 import { ApiClient, ApiError, connectApi, queryString } from "./api";
+import { formatEnglishDate } from "./dates";
 import { MarkdownView } from "./MarkdownView";
 
 const MarkdownEditor = lazy(() => import("./MarkdownEditor").then((module) => ({ default: module.MarkdownEditor })));
@@ -87,13 +88,14 @@ export function App() {
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [sidebarQuery, setSidebarQuery] = useState("");
   const [searchRequest, setSearchRequest] = useState({ query: "", key: 0 });
+  const [topicTags, setTopicTags] = useState<string[]>([]);
 
   useEffect(() => {
     connectApi().then(({ api: connected, bootstrap: info }) => { setApi(connected); setBootstrap(info); }).catch((error) => setConnectionError(errorMessage(error)));
   }, []);
 
   const liveRevision = useStoreRevision(api, bootstrap?.revision);
-  const topics = useLoad<any>(api ? () => api.get("/topics?sort=recent&limit=100") : null, [api, topicsRevision, liveRevision]);
+  const topics = useLoad<any>(api ? () => api.get(`/topics${queryString({ sort: "recent", limit: 100, tags: topicTags })}`) : null, [api, topicsRevision, liveRevision, topicTags]);
 
   if (connectionError) return <EmptyState title="Topical UI could not connect" detail={connectionError} />;
   if (!api) return <EmptyState title="Opening Topical" detail="Connecting to the local service…" />;
@@ -111,6 +113,12 @@ export function App() {
     setSelectedTopic(undefined);
     setView("search");
     setSearchRequest((current) => ({ query, key: current.key + 1 }));
+  };
+  const openTag = (tag: string) => {
+    if (!confirmNavigation()) return;
+    setTopicTags((current) => current.some((item) => item.localeCompare(tag, undefined, { sensitivity: "accent" }) === 0) ? current : [...current, tag]);
+    setSelectedTopic(undefined);
+    setView("topics");
   };
   return (
     <div className="app-shell">
@@ -137,24 +145,18 @@ export function App() {
       {view === "topics" && !selectedTopic && (
         <main className="surface">
           <PageHeader eyebrow="Workspace" title="Topics" actions={<button className="primary" onClick={() => setShowCreate(true)}>New topic</button>} />
+          {topicTags.length > 0 && <div className="filter-bar" aria-label="Active topic filters"><span>Matching all tags</span>{topicTags.map((tag) => <button key={tag} onClick={() => setTopicTags((current) => current.filter((item) => item !== tag))}>#{tag}<span aria-hidden="true"> ×</span></button>)}<button className="subtle" onClick={() => setTopicTags([])}>Clear filters</button></div>}
           {topics.loading && <Loading />}
           {topics.error && <InlineError text={topics.error} />}
           <div className="topic-grid">
-            {(topics.data?.topics || []).map((topic: any) => (
-              <button className="topic-card" key={topic.id} onClick={() => setSelectedTopic(topic.id)}>
-                <div className="topic-card-heading"><strong>{topic.title}</strong><span>→</span></div>
-                <p>{topic.summary || "No summary yet."}</p>
-                <TagList tags={topic.tags} />
-                <small>{topic.documentCount || 1} file{topic.documentCount === 1 ? "" : "s"} · {new Date(topic.updatedAt).toLocaleDateString()}</small>
-              </button>
-            ))}
+            {(topics.data?.topics || []).map((topic: any) => <TopicCard key={topic.id} topic={topic} onOpen={() => setSelectedTopic(topic.id)} onTagClick={openTag} />)}
           </div>
           {!topics.loading && !topics.data?.topics?.length && <EmptyState title="No topics yet" detail="Create the first Markdown-backed topic." />}
         </main>
       )}
-      {view === "topics" && selectedTopic && <TopicWorkspace api={api} topic={selectedTopic} liveRevision={liveRevision} onBack={() => { if (confirmNavigation()) setSelectedTopic(undefined); }} onChanged={() => setTopicsRevision((value) => value + 1)} onDirtyChange={setHasUnsavedChanges} />}
-      {view === "search" && <SearchView api={api} liveRevision={liveRevision} request={searchRequest} onOpen={(topic: string) => { setView("topics"); setSelectedTopic(topic); }} />}
-      {view === "tags" && <TagsView api={api} liveRevision={liveRevision} />}
+      {view === "topics" && selectedTopic && <TopicWorkspace api={api} topic={selectedTopic} liveRevision={liveRevision} onBack={() => { if (confirmNavigation()) setSelectedTopic(undefined); }} onChanged={() => setTopicsRevision((value) => value + 1)} onDirtyChange={setHasUnsavedChanges} onTagClick={openTag} />}
+      {view === "search" && <SearchView api={api} liveRevision={liveRevision} request={searchRequest} onOpen={(topic: string) => { setView("topics"); setSelectedTopic(topic); }} onTagClick={openTag} />}
+      {view === "tags" && <TagsView api={api} liveRevision={liveRevision} onTagClick={openTag} />}
       {view === "history" && <HistoryView api={api} liveRevision={liveRevision} />}
       {view === "trash" && <TrashView api={api} liveRevision={liveRevision} />}
       {view === "publications" && <PublicationsView api={api} topics={topics.data?.topics || []} liveRevision={liveRevision} />}
@@ -173,7 +175,19 @@ function PageHeader({ eyebrow, title, subtitle, actions }: { eyebrow: ReactNode;
   return <header className="page-header"><div><small>{eyebrow}</small><h1>{title}</h1>{subtitle && <p>{subtitle}</p>}</div><div className="header-actions">{actions}</div></header>;
 }
 
-function TopicWorkspace({ api, topic, liveRevision, onBack, onChanged, onDirtyChange }: { api: ApiClient; topic: string; liveRevision: number; onBack(): void; onChanged(): void; onDirtyChange(dirty: boolean): void }) {
+export function TopicCard({ topic, onOpen, onTagClick }: { topic: any; onOpen(): void; onTagClick(tag: string): void }) {
+  const fileCount = topic.fileCount ?? 0;
+  return <article className="topic-card">
+    <button className="topic-card-main" onClick={onOpen} aria-label={`Open ${topic.title}`}>
+      <div className="topic-card-heading"><strong>{topic.title}</strong><span aria-hidden="true">→</span></div>
+      <p>{topic.summary || "No summary yet."}</p>
+      <small>{fileCount} file{fileCount === 1 ? "" : "s"} · {formatEnglishDate(topic.updatedAt)}</small>
+    </button>
+    <TagList tags={topic.tags} onTagClick={onTagClick} />
+  </article>;
+}
+
+function TopicWorkspace({ api, topic, liveRevision, onBack, onChanged, onDirtyChange, onTagClick }: { api: ApiClient; topic: string; liveRevision: number; onBack(): void; onChanged(): void; onDirtyChange(dirty: boolean): void; onTagClick(tag: string): void }) {
   const [revision, setRevision] = useState(0);
   const overview = useLoad<any>(() => api.get(`/topics/${encodeURIComponent(topic)}/overview`), [api, topic, revision, liveRevision]);
   const [selectedPath, setSelectedPath] = useState("context.md");
@@ -281,7 +295,7 @@ function TopicWorkspace({ api, topic, liveRevision, onBack, onChanged, onDirtyCh
         <div className="file-list">
           {overview.data.files.map((item: any) => <button key={item.path} className={selectedPath === item.path ? "active" : ""} onClick={() => { if (!dirty || window.confirm("Discard the unsaved draft?")) setSelectedPath(item.path); }}><span>◇</span>{item.path}</button>)}
         </div>
-        <div className="context-section"><span className="section-label">Tags</span><TagList tags={metadata.tags} /></div>
+        <div className="context-section"><span className="section-label">Tags</span><TagList tags={metadata.tags} onTagClick={onTagClick} /></div>
         <div className="context-section"><span className="section-label">File hash</span><code className="hash">{file.hash}</code></div>
         <TopicHistory api={api} topic={topic} revision={revision + liveRevision} />
         {selectedPath !== "context.md" && <button className="danger subtle" onClick={() => setPendingDelete("file")}>Move file to trash</button>}
@@ -338,19 +352,19 @@ function CreateTopic({ api, onClose, onCreated }: any) {
   return <Dialog title="Create topic" onClose={onClose}><form className="form-stack" onSubmit={submit}><label>Title<input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} required /></label><label>Summary<textarea value={summary} onChange={(event) => setSummary(event.target.value)} /></label><label>Tags<input placeholder="optional, sparse, recurring" value={tagText} onChange={(event) => setTagText(event.target.value)} /></label><label>Initial Markdown<textarea rows={8} value={content} onChange={(event) => setContent(event.target.value)} /></label><label>Change description<input value={description} onChange={(event) => setDescription(event.target.value)} required minLength={3} /></label>{error && <InlineError text={error} />}<div className="dialog-actions"><button type="button" onClick={onClose}>Cancel</button><button className="primary">Create topic</button></div></form></Dialog>;
 }
 
-function SearchView({ api, onOpen, request, liveRevision }: { api: ApiClient; onOpen(topic: string): void; request: { query: string; key: number }; liveRevision: number }) {
+function SearchView({ api, onOpen, onTagClick, request, liveRevision }: { api: ApiClient; onOpen(topic: string): void; onTagClick(tag: string): void; request: { query: string; key: number }; liveRevision: number }) {
   const [query, setQuery] = useState(request.query); const [submitted, setSubmitted] = useState(request.query); const [result, setResult] = useState<any>(); const [error, setError] = useState<string>();
   const runSearch = async (next: string) => { if (!next.trim()) return; setSubmitted(next); setError(undefined); try { setResult(await api.get(`/search${queryString({ q: next, limit: 20 })}`)); } catch (reason) { setError(errorMessage(reason)); } };
   const search = async (event: FormEvent) => { event.preventDefault(); await runSearch(query); };
   useEffect(() => { if (request.query) { setQuery(request.query); void runSearch(request.query); } }, [request.key]);
   useEffect(() => { if (submitted) void runSearch(submitted); }, [liveRevision]);
-  return <main className="surface"><PageHeader eyebrow="Retrieval" title="Search" subtitle="Topic-grouped, strict first, with every widening step visible." /><form className="search-bar" onSubmit={search}><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search titles, tags, headings, and Markdown…" /><button className="primary">Search</button></form>{error && <InlineError text={error} />}{result && <><div className="result-summary"><ModeBadge mode={result.matchMode} /><span>{result.topics.length} topic{result.topics.length === 1 ? "" : "s"}</span>{result.analysis?.ignoredTerms?.length ? <span>{result.analysis.ignoredTerms.length} ignored term(s)</span> : null}</div><div className="result-list">{result.topics.map((item: any) => <button className="result-card" key={item.topic} onClick={() => onOpen(item.topic)}><div><strong>{item.title}</strong><TagList tags={item.tags} /></div><p>{item.files?.[0]?.snippet || item.summary}</p><small>{(item.matchedFields || []).join(" · ")}{item.files?.[0]?.path ? ` · ${item.files[0].path}` : ""}</small></button>)}</div>{!result.topics.length && <EmptyState title={`No results for “${submitted}”`} detail="Topical exhausted exact and approved bounded fallback modes." />}</>}</main>;
+  return <main className="surface"><PageHeader eyebrow="Retrieval" title="Search" subtitle="Topic-grouped, strict first, with every widening step visible." /><form className="search-bar" onSubmit={search}><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search titles, tags, headings, and Markdown…" /><button className="primary">Search</button></form>{error && <InlineError text={error} />}{result && <><div className="result-summary"><ModeBadge mode={result.matchMode} /><span>{result.topics.length} topic{result.topics.length === 1 ? "" : "s"}</span>{result.analysis?.ignoredTerms?.length ? <span>{result.analysis.ignoredTerms.length} ignored term(s)</span> : null}</div><div className="result-list">{result.topics.map((item: any) => <article className="result-card" key={item.topic}><button className="result-card-main" onClick={() => onOpen(item.topic)} aria-label={`Open ${item.title}`}><strong>{item.title}</strong><p>{item.files?.[0]?.snippet || item.summary}</p><small>{(item.matchedFields || []).join(" · ")}{item.files?.[0]?.path ? ` · ${item.files[0].path}` : ""}</small></button><TagList tags={item.tags} onTagClick={onTagClick} /></article>)}</div>{!result.topics.length && <EmptyState title={`No results for “${submitted}”`} detail="Topical exhausted exact and approved bounded fallback modes." />}</>}</main>;
 }
 
-export function TagsView({ api, liveRevision = 0 }: { api: ApiClient; liveRevision?: number }) {
+export function TagsView({ api, liveRevision = 0, onTagClick }: { api: ApiClient; liveRevision?: number; onTagClick?(tag: string): void }) {
   const data = useLoad<any>(() => api.get("/tags?limit=100"), [api, liveRevision]);
   const warnings = data.data?.warnings;
-  return <main className="surface"><PageHeader eyebrow="Taxonomy" title="Tags" subtitle="Guidance and warnings only. Authored metadata is never rewritten automatically." />{data.loading && <Loading />}{data.error && <InlineError text={data.error} />}<div className="table-list">{(data.data?.tags || []).map((item: any) => <div className="table-row" key={item.key}><div><strong>#{item.displayForms?.[0] || item.key}</strong><small>{item.displayForms?.length > 1 ? `Also written as ${item.displayForms.slice(1).join(", ")}` : item.topics?.join(" · ") || "Recurring facet"}</small></div><span>{item.usageCount} topic{item.usageCount === 1 ? "" : "s"}</span></div>)}</div>{warnings && <div className="warning-grid"><TaxonomyWarning title="Singleton tags" count={warnings.singletonSummary?.count} detail={warnings.singletonSummary?.sampleKeys?.join(", ")} /><TaxonomyWarning title="Display variants" count={warnings.variants?.length} detail={warnings.variants?.map((item: any) => item.key).join(", ")} /><TaxonomyWarning title="Comparison collisions" count={warnings.comparisonCollisions?.length} detail={warnings.comparisonCollisions?.map((item: any) => item.keys.join(" / ")).join(", ")} /><TaxonomyWarning title="Near duplicates" count={warnings.nearDuplicates?.length} detail={warnings.nearDuplicates?.map((item: any) => item.keys.join(" / ")).join(", ")} /><TaxonomyWarning title="Above three-tag guidance" count={warnings.overGuidance?.count} detail={warnings.overGuidance?.topics?.map((item: any) => item.topic).join(", ")} /></div>}</main>;
+  return <main className="surface"><PageHeader eyebrow="Taxonomy" title="Tags" subtitle="Guidance and warnings only. Authored metadata is never rewritten automatically." />{data.loading && <Loading />}{data.error && <InlineError text={data.error} />}<div className="table-list">{(data.data?.tags || []).map((item: any) => { const display = item.displayForms?.[0] || item.key; return <div className="table-row" key={item.key}><div>{onTagClick ? <button className="tag-heading" onClick={() => onTagClick(display)}>#{display}</button> : <strong>#{display}</strong>}<small>{item.displayForms?.length > 1 ? `Also written as ${item.displayForms.slice(1).join(", ")}` : item.topics?.join(" · ") || "Recurring facet"}</small></div><span>{item.usageCount} topic{item.usageCount === 1 ? "" : "s"}</span></div>; })}</div>{warnings && <div className="warning-grid"><TaxonomyWarning title="Singleton tags" count={warnings.singletonSummary?.count} detail={warnings.singletonSummary?.sampleKeys?.join(", ")} /><TaxonomyWarning title="Display variants" count={warnings.variants?.length} detail={warnings.variants?.map((item: any) => item.key).join(", ")} /><TaxonomyWarning title="Comparison collisions" count={warnings.comparisonCollisions?.length} detail={warnings.comparisonCollisions?.map((item: any) => item.keys.join(" / ")).join(", ")} /><TaxonomyWarning title="Near duplicates" count={warnings.nearDuplicates?.length} detail={warnings.nearDuplicates?.map((item: any) => item.keys.join(" / ")).join(", ")} /><TaxonomyWarning title="Above three-tag guidance" count={warnings.overGuidance?.count} detail={warnings.overGuidance?.topics?.map((item: any) => item.topic).join(", ")} /></div>}</main>;
 }
 
 function TaxonomyWarning({ title, count = 0, detail }: { title: string; count?: number; detail?: string }) {
@@ -359,14 +373,14 @@ function TaxonomyWarning({ title, count = 0, detail }: { title: string; count?: 
 
 function HistoryView({ api, liveRevision }: { api: ApiClient; liveRevision: number }) {
   const data = useLoad<any>(() => api.get("/history?limit=100"), [api, liveRevision]);
-  return <main className="surface"><PageHeader eyebrow="Audit" title="History" subtitle="Newest-first descriptions for every recorded mutation." />{data.loading && <Loading />}{data.error && <InlineError text={data.error} />}<div className="timeline">{(data.data?.events || []).map((event: any, index: number) => <div className="timeline-item" key={`${event.at}-${index}`}><span /><div><strong>{event.description}</strong><p>{event.topic}{event.path ? ` / ${event.path}` : ""} · {event.action}</p><small>{new Date(event.at).toLocaleString()}</small></div></div>)}</div></main>;
+  return <main className="surface"><PageHeader eyebrow="Audit" title="History" subtitle="Newest-first descriptions for every recorded mutation." />{data.loading && <Loading />}{data.error && <InlineError text={data.error} />}<div className="timeline">{(data.data?.events || []).map((event: any, index: number) => <div className="timeline-item" key={`${event.at}-${index}`}><span /><div><strong>{event.description}</strong><p>{event.topic}{event.path ? ` / ${event.path}` : ""} · {event.action}</p><small>{formatEnglishDate(event.at, { includeTime: true })}</small></div></div>)}</div></main>;
 }
 
 function TrashView({ api, liveRevision }: { api: ApiClient; liveRevision: number }) {
   const [revision, setRevision] = useState(0); const [notice, setNotice] = useState<Notice>(null);
   const data = useLoad<any>(() => api.get("/trash?limit=100"), [api, revision, liveRevision]);
   const restore = async (entry: any) => { const description = window.prompt(`Describe why ${entry.topic}${entry.path ? `/${entry.path}` : ""} is being restored:`); if (!description) return; try { await api.send("POST", `/trash/${entry.id}/restore`, { expectedHash: entry.hash, description }); setNotice({ kind: "success", text: "Restored from trash." }); setRevision((value) => value + 1); } catch (error) { setNotice({ kind: "error", text: errorMessage(error) }); } };
-  return <main className="surface"><PageHeader eyebrow="Recovery" title="Trash" subtitle="Soft-deleted files and topics remain recoverable; Topical never purges them automatically." />{notice && <div className={`notice ${notice.kind}`}>{notice.text}</div>}{data.loading && <Loading />}{data.error && <InlineError text={data.error} />}<div className="table-list">{(data.data?.entries || []).map((entry: any) => <div className="table-row" key={entry.id}><div><strong>{entry.topic}{entry.path ? ` / ${entry.path}` : ""}</strong><small>{entry.type} · {new Date(entry.trashedAt).toLocaleString()} · {entry.description}</small></div><button onClick={() => restore(entry)}>Restore</button></div>)}</div>{!data.loading && !data.data?.entries?.length && <EmptyState title="Trash is empty" detail="Deleted content will appear here with a recoverable hash." />}</main>;
+  return <main className="surface"><PageHeader eyebrow="Recovery" title="Trash" subtitle="Soft-deleted files and topics remain recoverable; Topical never purges them automatically." />{notice && <div className={`notice ${notice.kind}`}>{notice.text}</div>}{data.loading && <Loading />}{data.error && <InlineError text={data.error} />}<div className="table-list">{(data.data?.entries || []).map((entry: any) => <div className="table-row" key={entry.id}><div><strong>{entry.topic}{entry.path ? ` / ${entry.path}` : ""}</strong><small>{entry.type} · {formatEnglishDate(entry.trashedAt, { includeTime: true })} · {entry.description}</small></div><button onClick={() => restore(entry)}>Restore</button></div>)}</div>{!data.loading && !data.data?.entries?.length && <EmptyState title="Trash is empty" detail="Deleted content will appear here with a recoverable hash." />}</main>;
 }
 
 function SystemView({ api, liveRevision }: { api: ApiClient; liveRevision: number }) {
@@ -399,7 +413,7 @@ function CreatePublication({ api, topics, onClose, onCreated }: any) {
 function TopicHistory({ api, topic, revision }: { api: ApiClient; topic: string; revision: number }) {
   const [limit, setLimit] = useState(8);
   const data = useLoad<any>(() => api.get(`/history${queryString({ topic, limit })}`), [api, topic, limit, revision]);
-  return <div className="context-section topic-history"><span className="section-label">Topic history</span>{data.loading && !data.data && <Loading />}{data.error && <InlineError text={data.error} />}{(data.data?.events || []).map((event: any, index: number) => <div className="mini-history" key={`${event.at}-${event.action}-${index}`}><strong>{event.description}</strong><small>{event.action.replaceAll("_", " ")}{event.path ? ` · ${event.path}` : ""}<br />{new Date(event.at).toLocaleString()}</small></div>)}{data.data?.page?.nextCursor && <button className="subtle" onClick={() => setLimit((value) => Math.min(100, value + 12))}>Load more</button>}</div>;
+  return <div className="context-section topic-history"><span className="section-label">Topic history</span>{data.loading && !data.data && <Loading />}{data.error && <InlineError text={data.error} />}{(data.data?.events || []).map((event: any, index: number) => <div className="mini-history" key={`${event.at}-${event.action}-${index}`}><strong>{event.description}</strong><small>{event.action.replaceAll("_", " ")}{event.path ? ` · ${event.path}` : ""}<br />{formatEnglishDate(event.at, { includeTime: true })}</small></div>)}{data.data?.page?.nextCursor && <button className="subtle" onClick={() => setLimit((value) => Math.min(100, value + 12))}>Load more</button>}</div>;
 }
 
 function ReasonDialog({ title, detail, action, onClose, onSubmit }: { title: string; detail: string; action: string; onClose(): void; onSubmit(description: string): Promise<void> }) {
@@ -419,7 +433,7 @@ function Dialog({ title, children, onClose }: { title: string; children: ReactNo
 }
 
 function ModeBadge({ mode }: { mode: string }) { return <span className={`mode mode-${String(mode).replaceAll("_", "-")}`}>{String(mode).replaceAll("_", " ")}</span>; }
-function TagList({ tags = [] }: { tags?: string[] }) { return <div className="tag-list">{tags.map((tag) => <span key={tag}>#{tag}</span>)}</div>; }
+function TagList({ tags = [], onTagClick }: { tags?: string[]; onTagClick?(tag: string): void }) { return <div className="tag-list">{tags.map((tag) => onTagClick ? <button type="button" className="tag-pill" aria-label={`Show topics tagged ${tag}`} key={tag} onClick={() => onTagClick(tag)}>#{tag}</button> : <span key={tag}>#{tag}</span>)}</div>; }
 function Loading() { return <div className="loading"><span />Loading…</div>; }
 function InlineError({ text }: { text: string }) { return <div className="notice error">{text}</div>; }
 function EmptyState({ title, detail }: { title: string; detail: string }) { return <section className="empty-state"><div className="empty-mark">◇</div><h2>{title}</h2><p>{detail}</p></section>; }

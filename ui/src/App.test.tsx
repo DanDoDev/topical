@@ -1,7 +1,7 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import { markdownPathForName, TagsView, ViewErrorBoundary } from "./App";
+import { markdownPathForName, TagsView, TopicCard, ViewErrorBoundary } from "./App";
 import type { ApiClient } from "./api";
 
 describe("management UI regressions", () => {
@@ -36,5 +36,16 @@ describe("management UI regressions", () => {
     expect(markdownPathForName("research/observations")).toBe("research/observations.md");
     expect(markdownPathForName("research/observations.MD")).toBe("research/observations.md");
     expect(markdownPathForName("  note  ")).toBe("note.md");
+  });
+
+  it("uses the service fileCount and exposes tags as separate filters", () => {
+    const open = vi.fn();
+    const filter = vi.fn();
+    render(<TopicCard topic={{ title: "Penguin notes", summary: "Colony observations.", tags: ["wildlife"], fileCount: 3, updatedAt: "2026-08-17T13:08:00.000Z" }} onOpen={open} onTagClick={filter} />);
+
+    expect(screen.getByText(/3 files/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Show topics tagged wildlife" }));
+    expect(filter).toHaveBeenCalledWith("wildlife");
+    expect(open).not.toHaveBeenCalled();
   });
 });
