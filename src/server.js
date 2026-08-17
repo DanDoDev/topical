@@ -66,8 +66,8 @@ async function run() {
         const address = server.listeningOrigin;
         process.stdout.write(`Topical UI: ${address}\n`);
         if (!commandArgs.includes("--no-open")) {
-          const { default: open } = await import("open");
-          await open(address);
+          const { openBrowser } = await import("./open-browser.js");
+          await openBrowser(address);
         }
       } catch (error) {
         if (server) await server.close();
