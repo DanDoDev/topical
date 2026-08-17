@@ -9,6 +9,8 @@ Search uses a disposable SQLite FTS5 cache at `$TOPICAL_ROOT/.topical-cache/sear
 
 Topical is currently pre-1.0. Back up important topic folders before upgrading across versions while the storage and tool contracts are still evolving.
 
+Topical also includes a localhost-only management UI for browsing, grouped search, Markdown editing and preview, taxonomy guidance, audit history, recoverable trash, publication checkpoints, and index health. It uses the same store and safety contracts as MCP; the browser never accesses the filesystem directly.
+
 ## Install and configure
 
 ```bash
@@ -95,6 +97,27 @@ TOPICAL_ROOT = "/absolute/path/to/topical-files"
 ```
 
 After saving, restart the MCP host. See the [official Codex MCP configuration documentation](https://developers.openai.com/codex/mcp/).
+
+## Local management UI
+
+From a source checkout with Node 24 active and `TOPICAL_ROOT` configured, run:
+
+```bash
+npm run ui
+```
+
+The pre-run step builds the bundled client, starts one local process at `http://127.0.0.1:2223`, and opens the browser. Override the loopback port or suppress browser launch when needed:
+
+```bash
+npm run ui -- --port 3333
+npm run ui -- --no-open
+```
+
+An installed package also exposes `topical ui`. The UI works offline and does not require an account. Phase 1 intentionally has no remote-bind option.
+
+Every content or metadata save requires a concise audit description and the hash of the version that was read. If Markdown changes elsewhere, the UI shows the current file beside the unsaved draft and requires explicit review before retrying. Deletes remain recoverable trash operations, tag warnings remain advisory, reindexing rebuilds only derived state, and publication guidance never synchronizes a destination automatically.
+
+The local server rejects non-loopback Host headers, cross-origin mutations, non-JSON writes, and requests without its per-run CSRF token. It serves only bundled assets with a restrictive content security policy; rendered Markdown does not enable embedded HTML.
 
 ## Choosing a topic
 
@@ -220,6 +243,16 @@ updated_at: 2026-07-18T14:00:00.000Z
 ## Contributing and security
 
 Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow and safety invariants. Report vulnerabilities privately according to [SECURITY.md](SECURITY.md).
+
+The full development gate is:
+
+```bash
+npm test
+npm run test:e2e
+npm audit --omit=dev
+```
+
+The first command runs the Node/API suite and focused client tests after rebuilding the UI. The Playwright suite starts an isolated loopback server and exercises the packaged browser app in Chromium.
 
 ## License
 

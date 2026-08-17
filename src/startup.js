@@ -34,6 +34,8 @@ export function formatStartupError(error) {
     lines.push("Fix: set TOPICAL_ROOT in the MCP server environment to an absolute, dedicated topic directory.");
   } else if (/FTS5/i.test(message)) {
     lines.push("Fix: reinstall dependencies under Node 24 with `npm ci`; Topical requires the FTS5-enabled better-sqlite3 build.");
+  } else if (code === "EADDRINUSE") {
+    lines.push("Fix: stop the process using that port or start the UI with `topical ui --port <number>`.");
   }
 
   lines.push("Diagnostic: run the configured Topical command with `--doctor` (or `--doctor --json`).");

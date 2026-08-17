@@ -26,6 +26,11 @@ test("startup failures explain dependency and configuration recovery", () => {
   assert.match(formatStartupError(new Error("The installed SQLite binding does not include FTS5.")), /FTS5-enabled better-sqlite3/);
 });
 
+test("startup failures explain how to recover from a busy UI port", () => {
+  const message = formatStartupError(Object.assign(new Error("listen EADDRINUSE: address already in use 127.0.0.1:2223"), { code: "EADDRINUSE" }));
+  assert.match(message, /topical ui --port <number>/);
+});
+
 test("doctor validates a healthy configuration without mutating its root", async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "topical-doctor-"));
   t.after(() => rm(root, { recursive: true, force: true }));
