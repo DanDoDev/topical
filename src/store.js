@@ -1,18 +1,36 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, readFile, readdir, realpath, rename, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
+import { conflictError, TopicalError } from "./errors.js";
+import {
+  analyzeQuery,
+  assertBoundedText,
+  assertDescription,
+  assertMarkdown,
+  boundedEditDistance,
+  canonicalTagKey,
+  cleanTags,
+  comparisonTagKey,
+  CONTRACT_LIMITS,
+  normalizeSearchText,
+  normalizedSearchView,
+  parseTagArray,
+  queryAnalysisResponse,
+  technicalAliasEntries
+} from "./normalization.js";
+import { paginate } from "./pagination.js";
 import { queryWithRelaxedFallback } from "./search-index.js";
 import { SqliteSearchIndex } from "./sqlite-search-index.js";
 
 const ROOT_INDEX_VERSION = 3;
 const TOPIC_INDEX_VERSION = 4;
+const TRASH_MANIFEST_VERSION = 1;
 const MAX_RECENT_ACTIONS = 100;
-const MAX_MARKDOWN_BYTES = 5 * 1024 * 1024;
 const DEFAULT_OVERVIEW_CHARS = 6_000;
 
-export class TopicalError extends Error {}
+export { TopicalError } from "./errors.js";
 
 const now = () => new Date().toISOString();
 const hash = (value) => createHash("sha256").update(value).digest("hex");
@@ -27,18 +45,6 @@ function slugify(value) {
     .slice(0, 80);
   if (!slug) throw new TopicalError("Topic title must contain at least one letter or number.");
   return slug;
-}
-
-function assertDescription(description) {
-  if (typeof description !== "string" || description.trim().length < 3) {
-    throw new TopicalError("A short, one-sentence description is required for every change.");
-  }
-}
-
-function assertMarkdownSize(content) {
-  if (Buffer.byteLength(content, "utf8") > MAX_MARKDOWN_BYTES) {
-    throw new TopicalError("Markdown content cannot exceed 5 MiB per file.");
-  }
 }
 
 function assertTopicId(topic) {
@@ -62,6 +68,22 @@ function assertMarkdownPath(filePath, { allowContext = true } = {}) {
     throw new TopicalError("context.md is required and cannot be deleted.");
   }
   return normalized;
+}
+
+function assertExpectedHash(expectedHash, currentHash, details) {
+  if (typeof expectedHash !== "string" || !/^[a-f0-9]{64}$/.test(expectedHash)) {
+    throw new TopicalError("expectedHash is required and must be a SHA-256 hash.", {
+      code: "INVALID_INPUT",
+      details: { field: "expectedHash" }
+    });
+  }
+  if (expectedHash !== currentHash) {
+    throw conflictError("The reviewed content changed. Read it again before continuing.", {
+      ...details,
+      expectedHash,
+      currentHash
+    });
+  }
 }
 
 function toYamlScalar(value) {
@@ -90,9 +112,7 @@ function parseFrontmatter(markdown, fallback = {}) {
     if (separator < 1) continue;
     values[line.slice(0, separator).trim()] = parseScalar(line.slice(separator + 1));
   }
-  const tags = typeof values.tags === "string" && values.tags.startsWith("[")
-    ? values.tags.slice(1, -1).split(",").map((tag) => parseScalar(tag)).filter(Boolean)
-    : [];
+  const tags = parseTagArray(values.tags);
   return {
     metadata: {
       title: values.title || fallback.title,
@@ -168,10 +188,6 @@ function updateSection(markdown, section, replacement) {
   return `${markdown.slice(0, start)}\n\n${replacement.trim()}\n${markdown.slice(end)}`;
 }
 
-function normalizeText(value) {
-  return String(value).normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
-}
-
 function compactText(value) {
   return value.replace(/\s+/g, " ").trim();
 }
@@ -179,31 +195,46 @@ function compactText(value) {
 function bodySnippet(body, matchedTerms, query) {
   const source = compactText(body);
   if (!source) return "";
-  const normalized = normalizeText(source);
-  const phrase = normalizeText(query || "").trim();
+  const view = normalizedSearchView(source);
+  const phrase = normalizeSearchText(query || "").trim();
   const positions = [phrase, ...(matchedTerms || [])]
     .filter(Boolean)
-    .map((term) => normalized.indexOf(term))
+    .map((term) => view.text.indexOf(term))
     .filter((position) => position >= 0);
   const firstMatch = positions.length ? Math.min(...positions) : 0;
-  const start = Math.max(0, firstMatch - 110);
-  return source.slice(start, start + 320);
+  const sourceMatch = view.sourceOffsets[firstMatch] ?? 0;
+  const codepointsBefore = Array.from(source.slice(0, sourceMatch)).length;
+  const start = Math.max(0, codepointsBefore - 110);
+  return Array.from(source).slice(start, start + 320).join("");
 }
 
-function explainFileMatch(filePath, body, terms) {
-  const normalizedPath = normalizeText(filePath);
-  const normalizedHeadings = headingList(body).map(normalizeText);
-  const normalizedBody = normalizeText(body);
+function explainFileMatch(filePath, body, terms, aliasTerms = []) {
+  const normalizedPath = normalizeSearchText(filePath);
+  const normalizedHeadings = headingList(body).map(normalizeSearchText);
+  const normalizedBody = normalizeSearchText(body);
   const matchedTerms = [];
   const matchedFields = new Set();
+  const matchedAliases = [];
+  const aliasTermSet = new Set(aliasTerms);
+  const aliases = aliasTermSet.size ? technicalAliasEntries([filePath, body].join("\n")) : [];
   for (const term of terms || []) {
     let matched = false;
     if (normalizedPath.includes(term)) { matched = true; matchedFields.add("path"); }
     if (normalizedHeadings.some((heading) => heading.includes(term))) { matched = true; matchedFields.add("headings"); }
     if (normalizedBody.includes(term)) { matched = true; matchedFields.add("body"); }
+    for (const alias of aliasTermSet.has(term) ? aliases : []) {
+      const aliasTerms = alias.alias.match(/[\p{L}\p{N}]+/gu) || [];
+      if (alias.alias === term || aliasTerms.includes(term)) {
+        matched = true;
+        matchedFields.add("aliases");
+        if (!matchedAliases.some((entry) => entry.source === alias.source && entry.alias === alias.alias)) {
+          matchedAliases.push(alias);
+        }
+      }
+    }
     if (matched) matchedTerms.push(term);
   }
-  return { matchedTerms, matchedFields: [...matchedFields] };
+  return { matchedTerms, matchedFields: [...matchedFields], matchedAliases: matchedAliases.slice(0, 20) };
 }
 
 function headingList(markdown) {
@@ -503,6 +534,45 @@ export class TopicalStore {
     }
   }
 
+  #trashDirectory(id) {
+    if (!/^[a-f0-9-]{36}$/.test(id || "")) {
+      throw new TopicalError("Trash entry ID is invalid.", { code: "INVALID_INPUT", details: { field: "id" } });
+    }
+    return path.join(this.root, ".trash", id);
+  }
+
+  async #writeTrashManifest(container, entry) {
+    await assertSafeFilesystemPath(this.root, container);
+    await writeAtomic(this.root, path.join(container, "manifest.json"), `${JSON.stringify(entry, null, 2)}\n`);
+  }
+
+  async #readTrashEntry(id) {
+    const container = this.#trashDirectory(id);
+    await assertSafeFilesystemPath(this.root, container);
+    const manifestPath = path.join(container, "manifest.json");
+    if (!await exists(manifestPath)) throw new TopicalError(`Trash entry '${id}' does not exist.`, { code: "NOT_FOUND" });
+    const entry = await readJson(manifestPath, null);
+    if (!entry || entry.version !== TRASH_MANIFEST_VERSION || entry.id !== id) {
+      throw new TopicalError(`Trash entry '${id}' has an invalid manifest.`, { code: "INTEGRITY_ERROR" });
+    }
+    return { container, entry };
+  }
+
+  async #trashEntries() {
+    const trashRoot = path.join(this.root, ".trash");
+    await assertSafeFilesystemPath(this.root, trashRoot);
+    if (!await exists(trashRoot)) return [];
+    const entries = [];
+    for (const directory of await readdir(trashRoot, { withFileTypes: true })) {
+      if (!directory.isDirectory() || !/^[a-f0-9-]{36}$/.test(directory.name)) continue;
+      try {
+        const { entry } = await this.#readTrashEntry(directory.name);
+        entries.push(entry);
+      } catch { /* Invalid/incomplete entries are reported by health, not exposed as restorable. */ }
+    }
+    return entries.sort((left, right) => right.trashedAt.localeCompare(left.trashedAt) || left.id.localeCompare(right.id));
+  }
+
   async recordPublicationAction(topic, publication, description) {
     return this.#serial(async () => {
       assertDescription(description);
@@ -528,30 +598,153 @@ export class TopicalStore {
     return this.#serial(() => this.#reindexUnlocked());
   }
 
-  async listTopics({ sort = "recent", tags = [] } = {}) {
+  async listTopics({ sort = "recent", tags = [], cursor, limit = 50 } = {}) {
     const index = await this.#getRootIndex();
-    const wantedTags = tags.map((tag) => tag.toLowerCase());
+    const wantedTags = cleanTags(tags).map(canonicalTagKey);
     const topics = index.topics
-      .filter((topic) => wantedTags.every((tag) => topic.tags.map(String).map((value) => value.toLowerCase()).includes(tag)))
+      .filter((topic) => wantedTags.every((tag) => topic.tags.map(canonicalTagKey).includes(tag)))
       .map((topic) => ({ ...topic, tags: [...topic.tags], lastAction: topic.lastAction ? { ...topic.lastAction } : null }));
     if (sort === "title") topics.sort((a, b) => a.title.localeCompare(b.title));
     if (sort === "created") topics.sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
-    return topics;
+    const page = paginate(topics, { cursor, limit, maxLimit: 100 });
+    return { topics: page.items, page: page.page };
+  }
+
+  async listHistory({ topic, cursor, limit = 50 } = {}) {
+    let history;
+    if (topic) {
+      assertTopicId(topic);
+      try {
+        const index = await this.#topicIndex(topic);
+        history = [...(index.history || [])].reverse().map((event) => ({ topic, ...event }));
+      } catch (error) {
+        if (!(error instanceof TopicalError) || error.code !== "TOPICAL_ERROR" || !/does not exist/.test(error.message)) throw error;
+        const root = await this.#getRootIndex();
+        history = root.recentActions.filter((event) => event.topic === topic);
+      }
+    } else {
+      const index = await this.#getRootIndex();
+      history = [...index.recentActions];
+    }
+    const page = paginate(history, { cursor, limit, maxLimit: 100 });
+    return { events: page.items, page: page.page };
+  }
+
+  async getSystemHealth() {
+    const index = await this.#getRootIndex();
+    const search = await this.#searchIndex.health();
+    return {
+      status: search.status === "ready" ? "ready" : "degraded",
+      markdownAuthority: true,
+      catalogue: {
+        rootSchemaVersion: ROOT_INDEX_VERSION,
+        topicSchemaVersion: TOPIC_INDEX_VERSION,
+        updatedAt: index.updatedAt,
+        topics: index.topics.length,
+        documents: index.documents.length,
+        recentActions: index.recentActions.length
+      },
+      search,
+      rebuildRecommended: search.status !== "ready"
+    };
+  }
+
+  async listTags({ query = "", cursor, limit = 50 } = {}) {
+    const index = await this.#getRootIndex();
+    const normalizedQuery = normalizeSearchText(String(query || "").trim());
+    const byKey = new Map();
+    for (const topic of index.topics) {
+      for (const displayTag of topic.tags || []) {
+        const key = canonicalTagKey(displayTag);
+        if (!key) continue;
+        const entry = byKey.get(key) || { key, displayForms: new Set(), topics: new Set() };
+        entry.displayForms.add(String(displayTag));
+        entry.topics.add(topic.id);
+        byKey.set(key, entry);
+      }
+    }
+
+    const allTags = [...byKey.values()]
+      .map((entry) => ({
+        key: entry.key,
+        displayForms: [...entry.displayForms].sort((left, right) => left.localeCompare(right)),
+        usageCount: entry.topics.size,
+        topics: [...entry.topics].sort().slice(0, 10)
+      }))
+      .sort((left, right) => right.usageCount - left.usageCount || left.key.localeCompare(right.key));
+    const filtered = normalizedQuery
+      ? allTags.filter((entry) => normalizeSearchText([entry.key, ...entry.displayForms].join(" ")).includes(normalizedQuery))
+      : allTags;
+    const page = paginate(filtered, { cursor, limit, maxLimit: 100 });
+
+    const comparisonGroups = new Map();
+    for (const entry of allTags) {
+      const comparison = comparisonTagKey(entry.key);
+      const group = comparisonGroups.get(comparison) || [];
+      group.push(entry.key);
+      comparisonGroups.set(comparison, group);
+    }
+    const comparisonCollisions = [...comparisonGroups.entries()]
+      .filter(([, keys]) => new Set(keys).size > 1)
+      .slice(0, 20)
+      .map(([comparisonKey, keys]) => ({ comparisonKey, keys: [...new Set(keys)].sort() }));
+    const variants = allTags
+      .filter((entry) => entry.displayForms.length > 1)
+      .slice(0, 20)
+      .map((entry) => ({ key: entry.key, displayForms: entry.displayForms }));
+    const nearDuplicates = [];
+    const candidates = allTags.slice(0, 500);
+    for (let left = 0; left < candidates.length && nearDuplicates.length < 20; left += 1) {
+      for (let right = left + 1; right < candidates.length && nearDuplicates.length < 20; right += 1) {
+        const leftKey = comparisonTagKey(candidates[left].key);
+        const rightKey = comparisonTagKey(candidates[right].key);
+        if (leftKey.length < 4 || rightKey.length < 4 || leftKey === rightKey) continue;
+        if (boundedEditDistance(leftKey, rightKey, 1) === 1) {
+          nearDuplicates.push({ keys: [candidates[left].key, candidates[right].key] });
+        }
+      }
+    }
+    const overGuidance = index.topics.filter((topic) => (topic.tags || []).length > 3);
+    const singletonTags = allTags.filter((entry) => entry.usageCount === 1);
+    return {
+      summary: {
+        topics: index.topics.length,
+        taggedTopics: index.topics.filter((topic) => (topic.tags || []).length > 0).length,
+        assignments: index.topics.reduce((sum, topic) => sum + (topic.tags || []).length, 0),
+        uniqueCanonicalTags: allTags.length,
+        singletonTags: singletonTags.length,
+        topicsAboveGuidance: overGuidance.length
+      },
+      tags: page.items,
+      page: page.page,
+      warnings: {
+        singletonSummary: { count: singletonTags.length, sampleKeys: singletonTags.slice(0, 20).map((entry) => entry.key) },
+        variants,
+        comparisonCollisions,
+        nearDuplicates,
+        overGuidance: { count: overGuidance.length, topics: overGuidance.slice(0, 20).map((topic) => ({ topic: topic.id, tagCount: topic.tags.length })) }
+      },
+      guidance: "Zero tags is normal. Three tags is advisory. Review warnings explicitly; Topical never rewrites tags automatically."
+    };
   }
 
   async createTopic({ title, summary, tags = [], initialContent = "", description }) {
     return this.#serial(async () => {
       assertDescription(description);
-      const topic = slugify(title);
+      assertBoundedText(title, { field: "title", maxChars: CONTRACT_LIMITS.titleChars, allowEmpty: false });
+      assertBoundedText(summary ?? "", { field: "summary", maxChars: CONTRACT_LIMITS.summaryChars });
+      const cleanTitle = title.trim();
+      const cleanSummary = (summary ?? "").trim();
+      const topic = slugify(cleanTitle);
       const directory = this.#topicDirectory(topic);
       if (await exists(directory)) throw new TopicalError(`Topic '${topic}' already exists.`);
       const timestamp = now();
-      const cleanTags = [...new Set(tags.map((tag) => String(tag).trim()).filter(Boolean))];
+      const normalizedTags = cleanTags(tags);
       await mkdir(directory, { recursive: true });
-      assertMarkdownSize(initialContent);
+      assertMarkdown(initialContent);
       await assertSafeFilesystemPath(this.root, directory);
-      await writeAtomic(this.root, path.join(directory, "context.md"), formatContext({ title: title.trim(), summary: summary.trim(), tags: cleanTags, createdAt: timestamp, updatedAt: timestamp }, initialContent));
-      await writeAtomic(this.root, path.join(directory, "index.json"), JSON.stringify({ version: TOPIC_INDEX_VERSION, topic: { id: topic, title: title.trim(), summary: summary.trim(), tags: cleanTags, createdAt: timestamp, updatedAt: timestamp }, files: ["context.md"], history: [] }, null, 2) + "\n");
+      await writeAtomic(this.root, path.join(directory, "context.md"), formatContext({ title: cleanTitle, summary: cleanSummary, tags: normalizedTags, createdAt: timestamp, updatedAt: timestamp }, initialContent));
+      await writeAtomic(this.root, path.join(directory, "index.json"), JSON.stringify({ version: TOPIC_INDEX_VERSION, topic: { id: topic, title: cleanTitle, summary: cleanSummary, tags: normalizedTags, createdAt: timestamp, updatedAt: timestamp }, files: ["context.md"], history: [] }, null, 2) + "\n");
       const { searchTopic } = await this.#record(topic, "create_topic", "context.md", description);
       await this.#upsertTopicInRoot(topic);
       await this.#replaceSearchTopic(searchTopic);
@@ -574,10 +767,9 @@ export class TopicalStore {
   async updateTopicFile({ topic, filePath = "context.md", mode = "append", content, section, description, expectedHash }) {
     return this.#serial(async () => {
       assertDescription(description);
-      if (typeof content !== "string") throw new TopicalError("content must be a string.");
-      assertMarkdownSize(content);
+      assertMarkdown(content);
       const current = await this.readTopicFile({ topic, filePath });
-      if (expectedHash && expectedHash !== current.hash) throw new TopicalError("The file changed since it was read. Read it again before updating.");
+      assertExpectedHash(expectedHash, current.hash, { topic, path: current.path });
       let next;
       if (mode === "replace") next = content;
       else if (mode === "append") next = `${current.content.replace(/\s*$/, "")}\n\n${content.trim()}\n`;
@@ -607,7 +799,7 @@ export class TopicalStore {
     return this.#serial(async () => {
       assertDescription(description);
       const normalized = assertMarkdownPath(filePath, { allowContext: false });
-      assertMarkdownSize(content);
+      assertMarkdown(content);
       const directory = await this.#requireTopicDirectory(topic);
       const target = path.resolve(directory, normalized);
       if (!target.startsWith(`${directory}${path.sep}`)) throw new TopicalError("File path must stay inside the topic.");
@@ -621,36 +813,56 @@ export class TopicalStore {
     });
   }
 
-  async deleteTopicFile({ topic, filePath, description, confirm = false }) {
+  async deleteTopicFile({ topic, filePath, description, expectedHash, confirm = false }) {
     return this.#serial(async () => {
       assertDescription(description);
       if (!confirm) throw new TopicalError("Set confirm to true to move this file to Topical's trash.");
       const normalized = assertMarkdownPath(filePath, { allowContext: false });
+      const current = await this.readTopicFile({ topic, filePath: normalized });
+      assertExpectedHash(expectedHash, current.hash, { topic, path: normalized });
       const directory = await this.#requireTopicDirectory(topic);
       const target = path.resolve(directory, normalized);
       if (!target.startsWith(`${directory}${path.sep}`) || !await exists(target)) throw new TopicalError(`File '${normalized}' does not exist in '${topic}'.`);
       await assertSafeFilesystemPath(this.root, target);
-      const trashTarget = path.join(this.root, ".trash", `${topic}-${Date.now()}`, normalized);
+      const id = randomUUID();
+      const container = this.#trashDirectory(id);
+      const storagePath = `content/${normalized}`;
+      const trashTarget = path.join(container, storagePath);
       await assertSafeFilesystemPath(this.root, trashTarget);
       await mkdir(path.dirname(trashTarget), { recursive: true });
       await assertSafeFilesystemPath(this.root, trashTarget);
       await rename(target, trashTarget);
+      const entry = {
+        version: TRASH_MANIFEST_VERSION,
+        id,
+        type: "file",
+        topic,
+        path: normalized,
+        trashedAt: now(),
+        hash: current.hash,
+        description: description.trim(),
+        storagePath
+      };
+      await this.#writeTrashManifest(container, entry);
       const { searchTopic } = await this.#record(topic, "delete_file", normalized, description);
       await this.#upsertTopicInRoot(topic);
       await this.#replaceSearchTopic(searchTopic);
-      return { topic, path: normalized, trashedTo: trashTarget };
+      return { topic, path: normalized, trash: entry };
     });
   }
 
-  async updateTopicMetadata({ topic, title, summary, tags, description }) {
+  async updateTopicMetadata({ topic, title, summary, tags, description, expectedHash }) {
     return this.#serial(async () => {
       assertDescription(description);
       const current = await this.readTopicFile({ topic });
+      assertExpectedHash(expectedHash, current.hash, { topic, path: "context.md" });
+      if (title !== undefined) assertBoundedText(title, { field: "title", maxChars: CONTRACT_LIMITS.titleChars, allowEmpty: false });
+      if (summary !== undefined) assertBoundedText(summary, { field: "summary", maxChars: CONTRACT_LIMITS.summaryChars });
       const parsed = parseFrontmatter(current.content, { title: topic, summary: "", tags: [] });
       const metadata = {
         title: title?.trim() || parsed.metadata.title || topic,
         summary: summary?.trim() ?? parsed.metadata.summary ?? "",
-        tags: tags ? [...new Set(tags.map((tag) => String(tag).trim()).filter(Boolean))] : parsed.metadata.tags || [],
+        tags: tags ? cleanTags(tags) : parsed.metadata.tags || [],
         createdAt: parsed.metadata.createdAt || now(),
         updatedAt: now()
       };
@@ -659,23 +871,105 @@ export class TopicalStore {
       const { searchTopic } = await this.#record(topic, "update_metadata", "context.md", description);
       await this.#upsertTopicInRoot(topic);
       await this.#replaceSearchTopic(searchTopic);
-      return { topic, metadata };
+      const persisted = await this.readTopicFile({ topic });
+      return { topic, metadata, hash: persisted.hash };
     });
   }
 
-  async deleteTopic({ topic, description, confirm = false }) {
+  async deleteTopic({ topic, description, expectedHash, confirm = false }) {
     return this.#serial(async () => {
       assertDescription(description);
       if (!confirm) throw new TopicalError("Set confirm to true to move this topic to Topical's trash.");
+      const current = await this.readTopicFile({ topic });
+      assertExpectedHash(expectedHash, current.hash, { topic, path: "context.md" });
       const directory = await this.#requireTopicDirectory(topic);
-      const target = path.join(this.root, ".trash", `${topic}-${Date.now()}`);
+      const id = randomUUID();
+      const container = this.#trashDirectory(id);
+      const storagePath = "topic";
+      const target = path.join(container, storagePath);
       await assertSafeFilesystemPath(this.root, target);
       await mkdir(path.dirname(target), { recursive: true });
       await assertSafeFilesystemPath(this.root, target);
       await rename(directory, target);
-      await this.#removeTopicFromRoot(topic, { at: now(), action: "delete_topic", path: null, description: description.trim() });
+      const entry = {
+        version: TRASH_MANIFEST_VERSION,
+        id,
+        type: "topic",
+        topic,
+        path: null,
+        trashedAt: now(),
+        hash: current.hash,
+        description: description.trim(),
+        storagePath
+      };
+      await this.#writeTrashManifest(container, entry);
+      await this.#removeTopicFromRoot(topic, { at: entry.trashedAt, action: "delete_topic", path: null, description: description.trim() });
       await this.#removeSearchTopic(topic);
-      return { topic, trashedTo: target };
+      return { topic, trash: entry };
+    });
+  }
+
+  async listTrash({ type, topic, cursor, limit = 50 } = {}) {
+    await this.initialize();
+    const entries = (await this.#trashEntries())
+      .filter((entry) => !type || entry.type === type)
+      .filter((entry) => !topic || entry.topic === topic)
+      .map(({ storagePath: _storagePath, version: _version, ...entry }) => ({ ...entry }));
+    const page = paginate(entries, { cursor, limit, maxLimit: 100 });
+    return {
+      entries: page.items,
+      page: page.page,
+      retention: {
+        automaticDeletion: false,
+        oldestTrashedAt: entries.at(-1)?.trashedAt || null,
+        newestTrashedAt: entries[0]?.trashedAt || null
+      }
+    };
+  }
+
+  async restoreTrash({ id, expectedHash, description }) {
+    return this.#serial(async () => {
+      assertDescription(description);
+      const { container, entry } = await this.#readTrashEntry(id);
+      assertExpectedHash(expectedHash, entry.hash, { id, topic: entry.topic, path: entry.path });
+      const stored = path.join(container, entry.storagePath);
+      await assertSafeFilesystemPath(this.root, stored);
+      if (!await exists(stored)) throw new TopicalError(`Trash entry '${id}' content is missing.`, { code: "INTEGRITY_ERROR" });
+
+      if (entry.type === "file") {
+        const storedContent = await readFile(stored, "utf8");
+        if (hash(storedContent) !== entry.hash) throw new TopicalError(`Trash entry '${id}' content failed its hash check.`, { code: "INTEGRITY_ERROR" });
+        const directory = await this.#requireTopicDirectory(entry.topic);
+        const destination = path.resolve(directory, assertMarkdownPath(entry.path, { allowContext: false }));
+        if (!destination.startsWith(`${directory}${path.sep}`)) throw new TopicalError("Restore path must stay inside the topic.");
+        await assertSafeFilesystemPath(this.root, destination);
+        if (await exists(destination)) throw conflictError("The original file path already exists; review it before restoring.", { topic: entry.topic, path: entry.path });
+        await mkdir(path.dirname(destination), { recursive: true });
+        await assertSafeFilesystemPath(this.root, destination);
+        await rename(stored, destination);
+        const { searchTopic } = await this.#record(entry.topic, "restore_file", entry.path, description);
+        await this.#upsertTopicInRoot(entry.topic);
+        await this.#replaceSearchTopic(searchTopic);
+      } else if (entry.type === "topic") {
+        const contextPath = path.join(stored, "context.md");
+        await assertSafeFilesystemPath(this.root, contextPath);
+        const storedContext = await readFile(contextPath, "utf8");
+        if (hash(storedContext) !== entry.hash) throw new TopicalError(`Trash entry '${id}' content failed its hash check.`, { code: "INTEGRITY_ERROR" });
+        const destination = this.#topicDirectory(entry.topic);
+        if (await exists(destination)) throw conflictError("The original topic ID already exists; review it before restoring.", { topic: entry.topic });
+        await rename(stored, destination);
+        const { searchTopic } = await this.#record(entry.topic, "restore_topic", null, description);
+        await this.#upsertTopicInRoot(entry.topic);
+        await this.#replaceSearchTopic(searchTopic);
+      } else {
+        throw new TopicalError(`Trash entry '${id}' has an unsupported type.`, { code: "INTEGRITY_ERROR" });
+      }
+
+      await rm(container, { recursive: true, force: true });
+      const restored = entry.type === "file"
+        ? await this.readTopicFile({ topic: entry.topic, filePath: entry.path })
+        : await this.readTopicFile({ topic: entry.topic });
+      return { id, type: entry.type, topic: entry.topic, path: entry.path, hash: restored.hash };
     });
   }
 
@@ -704,8 +998,9 @@ export class TopicalStore {
 
   async searchTopics({ query, tags = [], limit = 10 }) {
     await this.initialize();
-    const sourceQuery = String(query || "").trim();
-    const result = await queryWithRelaxedFallback(this.#searchIndex, { query: sourceQuery, tags, limit });
+    const analysis = analyzeQuery(query);
+    const sourceQuery = analysis.source;
+    const result = await queryWithRelaxedFallback(this.#searchIndex, { query: sourceQuery, analysis, tags: cleanTags(tags), limit });
     const topics = [];
     for (const topic of result.topics) {
       const directory = await this.#requireTopicDirectory(topic.topic);
@@ -716,7 +1011,7 @@ export class TopicalStore {
         if (!await exists(target)) continue;
         const content = await readFile(target, "utf8");
         const parsed = parseFrontmatter(content);
-        const explanation = explainFileMatch(file.path, parsed.body, topic.matchedTerms);
+        const explanation = explainFileMatch(file.path, parsed.body, topic.matchedTerms, topic.aliasMatchedTerms);
         files.push({
           ...file,
           ...explanation,
@@ -725,6 +1020,12 @@ export class TopicalStore {
       }
       topics.push({ ...topic, files });
     }
-    return { query: sourceQuery, matchMode: result.matchMode, topics };
+    return {
+      query: sourceQuery,
+      analysis: queryAnalysisResponse(analysis),
+      matchMode: result.matchMode,
+      expansions: result.expansions || [],
+      topics
+    };
   }
 }

@@ -4,8 +4,14 @@ import path from "node:path";
 import process from "node:process";
 import { performance } from "node:perf_hooks";
 
+import { SqliteSearchIndex } from "../src/sqlite-search-index.js";
 import { TopicalStore } from "../src/store.js";
-import { BENCHMARK_DOCUMENT_COUNTS, generateBenchmarkFixture, materializeBenchmarkFixture } from "../test/fixtures/generated-corpus.js";
+import {
+  BENCHMARK_DOCUMENT_COUNTS,
+  BENCHMARK_FIXTURE_ID,
+  generateBenchmarkFixture,
+  materializeBenchmarkFixture
+} from "../test/fixtures/generated-corpus.js";
 import { auditLegacyIndexes } from "./legacy-index-audit.js";
 
 function elapsed(start) {
@@ -21,11 +27,11 @@ function distribution(samples) {
   };
 }
 
-async function benchmark(documentCount) {
+async function benchmark(documentCount, documentsPerTopic) {
   const root = await mkdtemp(path.join(os.tmpdir(), `topical-v04-${documentCount}-`));
   let store;
   try {
-    await materializeBenchmarkFixture(root, generateBenchmarkFixture(documentCount));
+    await materializeBenchmarkFixture(root, generateBenchmarkFixture(documentCount, { documentsPerTopic }));
     store = new TopicalStore(root);
     let start = performance.now();
     await store.initialize();
@@ -37,7 +43,10 @@ async function benchmark(documentCount) {
     await store.initialize();
     const warmStartupMs = elapsed(start);
 
-    const mutationTarget = { topic: "benchmark-topic-001", filePath: "notes/document-001.md" };
+    const mutationTarget = {
+      topic: "benchmark-topic-001",
+      filePath: documentsPerTopic === 1 ? "context.md" : "notes/document-001.md"
+    };
     const before = await store.readTopicFile(mutationTarget);
     start = performance.now();
     await store.updateTopicFile({
@@ -58,7 +67,26 @@ async function benchmark(documentCount) {
         querySamples.push(elapsed(start));
       }
     }
-    return { documentCount, coldRebuildMs, warmStartupMs, mutationMs, query: distribution(querySamples), index };
+    await store.close();
+    store = null;
+
+    const searchIndex = new SqliteSearchIndex(root);
+    const searchHealth = await searchIndex.health();
+    await searchIndex.close();
+
+    return {
+      documentCount,
+      coldRebuildMs,
+      warmStartupMs,
+      mutationMs,
+      query: distribution(querySamples),
+      search: {
+        sqliteVersion: searchHealth.sqliteVersion,
+        fts5: searchHealth.fts5,
+        schemaVersion: searchHealth.schemaVersion
+      },
+      index
+    };
   } finally {
     await store?.close();
     if (root.startsWith(`${os.tmpdir()}${path.sep}topical-v04-`)) {
@@ -71,15 +99,23 @@ const requested = process.argv.find((argument) => argument.startsWith("--sizes="
 const sizes = requested
   ? requested.slice("--sizes=".length).split(",").map(Number)
   : [...BENCHMARK_DOCUMENT_COUNTS];
+const documentsPerTopicArgument = process.argv.find((argument) => argument.startsWith("--documents-per-topic="));
+const documentsPerTopic = documentsPerTopicArgument
+  ? Number(documentsPerTopicArgument.slice("--documents-per-topic=".length))
+  : 100;
 if (!sizes.length || sizes.some((size) => !BENCHMARK_DOCUMENT_COUNTS.includes(size))) {
   throw new RangeError(`--sizes must contain only ${BENCHMARK_DOCUMENT_COUNTS.join(", ")}.`);
 }
+if (!Number.isInteger(documentsPerTopic) || documentsPerTopic < 1 || documentsPerTopic > 100) {
+  throw new RangeError("--documents-per-topic must be an integer from 1 through 100.");
+}
 
 const results = [];
-for (const size of sizes) results.push(await benchmark(size));
+for (const size of sizes) results.push(await benchmark(size, documentsPerTopic));
 process.stdout.write(`${JSON.stringify({
   recordedAt: new Date().toISOString(),
   runtime: { node: process.version, platform: process.platform, arch: process.arch },
+  fixture: { id: BENCHMARK_FIXTURE_ID, documentCounts: sizes, documentsPerTopic },
   implementation: "v0.4 SQLite FTS5 derived search cache",
   results
 }, null, 2)}\n`);

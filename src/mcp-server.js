@@ -8,7 +8,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
-import { TopicalError, TopicalStore } from "./store.js";
+import { TopicalError } from "./errors.js";
+import { TopicalStore } from "./store.js";
 import { PublicationStore } from "./publications.js";
 
 async function loadDotEnv() {
@@ -31,8 +32,15 @@ function tool(handler) {
     try {
       return textResult(await handler(input));
     } catch (error) {
-      const message = error instanceof TopicalError || error instanceof Error ? error.message : "Unexpected Topical error.";
-      return textResult({ error: message }, true);
+      const known = error instanceof TopicalError;
+      const message = known || error instanceof Error ? error.message : "Unexpected Topical error.";
+      return textResult({
+        error: {
+          code: known ? error.code : "INTERNAL_ERROR",
+          message,
+          ...(known && error.details !== undefined ? { details: error.details } : {})
+        }
+      }, true);
     }
   };
 }
@@ -48,6 +56,8 @@ const destinationAlias = z.string().min(1).describe("Configured publication-root
 const destinationPath = z.string().min(1).describe("New safe relative Markdown path under the configured destination alias. A new publication refuses an existing path.");
 const publicationContent = z.string().max(5 * 1024 * 1024).describe("Complete polished Markdown supplied by the caller. Topical does not generate or summarize it.");
 const destinationHash = z.string().length(64).describe("Current destination SHA-256 from read_publication.status.currentTargetHash. Use this to prevent overwriting external edits.");
+const contentHash = z.string().regex(/^[a-f0-9]{64}$/).describe("Current SHA-256 returned by read_topic_file. Required to protect reviewed mutations from stale content.");
+const cursor = z.string().min(1).optional().describe("Opaque cursor returned by the previous page.");
 const SERVER_INSTRUCTIONS = [
   "TOPICAL_ROOT is the shared parent directory for all Topical topics.",
   "A topic is the explicit folder ID supplied to tools, not a Codex task, chat, workspace, or current project.",
@@ -87,17 +97,38 @@ export async function startServer() {
 
   server.registerTool("search_topics", {
     title: "Search topics",
-    description: "Search Topical note folders with topic-grouped strict matching and an explicitly marked relaxed fallback. Use first to find the explicit topic for a write; topics are not Codex chats or projects.",
+    description: "Search Topical note folders with topic-grouped strict matching, an explicitly marked relaxed fallback, and conservative visible expansion only after both exact-token passes are empty. Use first to find the explicit topic for a write; topics are not Codex chats or projects.",
     inputSchema: { query: z.string().default(""), tags: optionalTags, limit: z.number().int().min(1).max(50).optional() },
     annotations: { readOnlyHint: true }
   }, tool((input) => store.searchTopics(input)));
 
   server.registerTool("list_topics", {
     title: "List topics",
-    description: "List known Topical note folders. Use when a user refers to existing notes and the explicit topic is unclear.",
-    inputSchema: { sort: z.enum(["recent", "title", "created"]).optional(), tags: optionalTags },
+    description: "List a bounded page of known Topical note folders. Use when a user refers to existing notes and the explicit topic is unclear.",
+    inputSchema: { sort: z.enum(["recent", "title", "created"]).optional(), tags: optionalTags, cursor, limit: z.number().int().min(1).max(100).optional() },
     annotations: { readOnlyHint: true }
   }, tool((input) => store.listTopics(input)));
+
+  server.registerTool("list_tags", {
+    title: "List tags",
+    description: "Return bounded tag usage, sparse-tag guidance, and advisory variant warnings without changing Markdown. Inspect this taxonomy before proposing new tags.",
+    inputSchema: { query: z.string().max(2000).optional(), cursor, limit: z.number().int().min(1).max(100).optional() },
+    annotations: { readOnlyHint: true }
+  }, tool((input) => store.listTags(input)));
+
+  server.registerTool("list_history", {
+    title: "List history",
+    description: "Return a bounded, newest-first audit history page globally or for one explicit topic.",
+    inputSchema: { topic: optionalTopicId, cursor, limit: z.number().int().min(1).max(100).optional() },
+    annotations: { readOnlyHint: true }
+  }, tool((input) => store.listHistory(input)));
+
+  server.registerTool("get_system_health", {
+    title: "Get system health",
+    description: "Report catalogue and disposable search-cache health without changing Markdown or derived state.",
+    inputSchema: {},
+    annotations: { readOnlyHint: true }
+  }, tool(() => store.getSystemHealth()));
 
   server.registerTool("create_topic", {
     title: "Create topic",
@@ -127,14 +158,14 @@ export async function startServer() {
 
   server.registerTool("update_topic_file", {
     title: "Update topic file",
-    description: "Append, replace, or replace a named Markdown section in the explicit topic. Read first and use expectedHash when avoiding stale overwrites matters.",
+    description: "Append, replace, or replace a named Markdown section in the explicit topic. Read first; the reviewed expectedHash is required for conflict safety.",
     inputSchema: {
       topic: topicId,
       filePath: optionalTopicFilePath,
       mode: z.enum(["append", "replace", "replace_section"]).optional(),
       content: z.string(),
       section: z.string().optional(),
-      expectedHash: z.string().length(64).optional(),
+      expectedHash: contentHash,
       description
     }
   }, tool((input) => store.updateTopicFile(input)));
@@ -148,20 +179,33 @@ export async function startServer() {
   server.registerTool("delete_topic_file", {
     title: "Delete topic file",
     description: "Move a supporting Markdown file from the explicitly selected topic to Topical's .trash directory. context.md cannot be deleted.",
-    inputSchema: { topic: topicId, filePath: topicFilePath, confirm: z.literal(true), description }
+    inputSchema: { topic: topicId, filePath: topicFilePath, expectedHash: contentHash, confirm: z.literal(true), description }
   }, tool((input) => store.deleteTopicFile(input)));
 
   server.registerTool("update_topic_metadata", {
     title: "Update topic metadata",
     description: "Update context.md frontmatter in the explicitly selected Topical topic.",
-    inputSchema: { topic: topicId, title: topicTitle.optional(), summary: z.string().max(500).optional(), tags: optionalTags, description }
+    inputSchema: { topic: topicId, title: topicTitle.optional(), summary: z.string().max(500).optional(), tags: optionalTags, expectedHash: contentHash, description }
   }, tool((input) => store.updateTopicMetadata(input)));
 
   server.registerTool("delete_topic", {
     title: "Delete topic",
     description: "Move the explicitly selected Topical topic folder to Topical's .trash directory.",
-    inputSchema: { topic: topicId, confirm: z.literal(true), description }
+    inputSchema: { topic: topicId, expectedHash: contentHash, confirm: z.literal(true), description }
   }, tool((input) => store.deleteTopic(input)));
+
+  server.registerTool("list_trash", {
+    title: "List trash",
+    description: "List bounded recoverable soft-deletion entries and retention status without modifying them.",
+    inputSchema: { type: z.enum(["file", "topic"]).optional(), topic: optionalTopicId, cursor, limit: z.number().int().min(1).max(100).optional() },
+    annotations: { readOnlyHint: true }
+  }, tool((input) => store.listTrash(input)));
+
+  server.registerTool("restore_trash", {
+    title: "Restore trash",
+    description: "Restore one reviewed soft-deletion entry to its original path. Refuses destination conflicts and requires the trashed content hash.",
+    inputSchema: { id: z.string().uuid(), expectedHash: contentHash, description }
+  }, tool((input) => store.restoreTrash(input)));
 
   server.registerTool("publish_document", {
     title: "Publish document",
@@ -172,7 +216,7 @@ export async function startServer() {
   server.registerTool("list_publications", {
     title: "List publications",
     description: "Read-only list of publication checkpoints, divergence states, and advisory guidance. It never republishes or changes files.",
-    inputSchema: { topic: optionalTopicId, includeArchived: z.boolean().optional() },
+    inputSchema: { topic: optionalTopicId, includeArchived: z.boolean().optional(), cursor, limit: z.number().int().min(1).max(100).optional() },
     annotations: { readOnlyHint: true }
   }, tool((input) => publications.listPublications(input)));
 

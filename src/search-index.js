@@ -1,6 +1,8 @@
 export const SEARCH_MATCH_MODE = Object.freeze({
+  LISTING: "listing",
   STRICT: "strict",
-  RELAXED: "relaxed"
+  RELAXED: "relaxed",
+  EXPANDED: "expanded"
 });
 
 const REQUIRED_METHODS = ["rebuild", "replace", "remove", "query", "health", "close"];
@@ -53,6 +55,13 @@ function assertTopicGroupedResults(results) {
  */
 export async function queryWithRelaxedFallback(searchIndex, request) {
   const index = assertSearchIndex(searchIndex);
+  if (request.analysis?.terms.length === 0 || (!request.analysis && !String(request.query || "").trim())) {
+    const topics = assertTopicGroupedResults(await index.query({
+      ...request,
+      matchMode: SEARCH_MATCH_MODE.LISTING
+    }));
+    return { matchMode: SEARCH_MATCH_MODE.LISTING, topics };
+  }
   const strictTopics = assertTopicGroupedResults(await index.query({
     ...request,
     matchMode: SEARCH_MATCH_MODE.STRICT
@@ -65,5 +74,20 @@ export async function queryWithRelaxedFallback(searchIndex, request) {
     ...request,
     matchMode: SEARCH_MATCH_MODE.RELAXED
   }));
-  return { matchMode: SEARCH_MATCH_MODE.RELAXED, topics: relaxedTopics };
+  if (relaxedTopics.length) {
+    return { matchMode: SEARCH_MATCH_MODE.RELAXED, topics: relaxedTopics };
+  }
+
+  const expandedTopics = assertTopicGroupedResults(await index.query({
+    ...request,
+    matchMode: SEARCH_MATCH_MODE.EXPANDED
+  }));
+  if (expandedTopics.length) {
+    return {
+      matchMode: SEARCH_MATCH_MODE.EXPANDED,
+      expansions: expandedTopics[0].queryExpansions || [],
+      topics: expandedTopics
+    };
+  }
+  return { matchMode: SEARCH_MATCH_MODE.RELAXED, topics: [] };
 }

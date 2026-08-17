@@ -46,6 +46,23 @@ test("relaxed fallback runs only after an empty strict pass and is clearly marke
   assert.deepEqual(calls, [SEARCH_MATCH_MODE.STRICT]);
 });
 
+test("expanded search runs only after strict and relaxed passes are empty", async () => {
+  const calls = [];
+  const index = {
+    rebuild() {}, replace() {}, remove() {}, health() {}, close() {},
+    query({ matchMode }) {
+      calls.push(matchMode);
+      return matchMode === SEARCH_MATCH_MODE.EXPANDED
+        ? [{ topic: "morphology-reference", queryExpansions: [{ from: "projet", to: "projets", distance: 1 }] }]
+        : [];
+    }
+  };
+  const result = await queryWithRelaxedFallback(index, { query: "projet validation" });
+  assert.equal(result.matchMode, SEARCH_MATCH_MODE.EXPANDED);
+  assert.deepEqual(calls, [SEARCH_MATCH_MODE.STRICT, SEARCH_MATCH_MODE.RELAXED, SEARCH_MATCH_MODE.EXPANDED]);
+  assert.deepEqual(result.expansions, [{ from: "projet", to: "projets", distance: 1 }]);
+});
+
 test("the grouped result contract rejects duplicate topic rows", async () => {
   const duplicateIndex = {
     rebuild() {}, replace() {}, remove() {}, health() {}, close() {},
