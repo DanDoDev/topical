@@ -32,6 +32,7 @@ test("HTTP bootstrap is loopback-only and exposes a per-run mutation token", asy
 
   const response = await server.inject({ method: "GET", url: "/api/v1/bootstrap", headers: { host } });
   assert.equal(response.statusCode, 200);
+  assert.equal(response.json().version, "0.5.0");
   assert.equal(response.json().csrfToken, "test-token");
   assert.match(response.headers["content-security-policy"], /default-src 'self'/);
   assert.equal(response.headers["cache-control"], "no-store");

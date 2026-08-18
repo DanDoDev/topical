@@ -69,7 +69,7 @@ For development, `npm run preflight` checks the runtime without loading native d
 
 If an MCP host reports that Topical exited, closed its connection, or exposed no tools:
 
-1. Run `node --version`; Topical v0.4 requires Node 24.x.
+1. Run `node --version`; Topical v0.5 requires Node 24.x.
 2. Run `nvm install`, `nvm use`, and `npm ci` in the Topical checkout.
 3. Run `nvm which 24` and place that absolute executable in the MCP server's `command` setting. Do not rely on the host resolving `node` through your interactive shell.
 4. Confirm `TOPICAL_ROOT` is set in the MCP server environment to an absolute, dedicated directory. Adding the directory as a workspace root does not configure the MCP process.
@@ -265,10 +265,10 @@ npm ci
 npm pack
 ```
 
-This produces a file such as `topical-mcp-0.4.0.tgz`. Transfer that file to the target machine, then install only the runtime dependencies:
+This produces a file such as `topical-mcp-0.5.0.tgz`. Transfer that file to the target machine, then install only the runtime dependencies:
 
 ```bash
-npm install --global ./topical-mcp-0.4.0.tgz --omit=dev
+npm install --global ./topical-mcp-0.5.0.tgz --omit=dev
 ```
 
 Start the GUI server:

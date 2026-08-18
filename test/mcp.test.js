@@ -23,6 +23,7 @@ test("MCP server registers and calls Topical tools over stdio", async (t) => {
   await client.connect(transport);
   t.after(async () => { await transport.close(); });
 
+  assert.equal(client.getServerVersion()?.version, "0.5.0");
   assert.match(client.getInstructions() || "", /TOPICAL_ROOT is the shared parent directory/);
 
   const tools = await client.listTools();

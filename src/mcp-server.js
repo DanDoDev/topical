@@ -55,10 +55,10 @@ const description = z.string().min(3).max(500).describe("One sentence explaining
 
 export async function startServer({ application, transport } = {}) {
   const nodeMajor = Number(process.versions.node.split(".")[0]);
-  if (nodeMajor !== 24) throw new Error(`Topical v0.4 requires Node.js 24 LTS; found ${process.version}.`);
+  if (nodeMajor !== 24) throw new Error(`Topical v0.5 requires Node.js 24 LTS; found ${process.version}.`);
   const app = application || new TopicalApplication(await loadTopicalConfig());
   await app.initialize();
-  const server = new McpServer({ name: "topical", version: "0.4.0" }, { instructions: SERVER_INSTRUCTIONS });
+  const server = new McpServer({ name: "topical", version: "0.5.0" }, { instructions: SERVER_INSTRUCTIONS });
 
   server.registerTool("search_topics", {
     title: "Search topics",

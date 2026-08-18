@@ -105,7 +105,7 @@ export function createHttpServer({ application, csrfToken = randomBytes(32).toSt
   server.setErrorHandler((error, _request, reply) => reply.code(statusFor(error)).send(errorBody(error)));
 
   server.get("/api/v1/bootstrap", async () => ({
-    version: "0.5.0-dev",
+    version: "0.5.0",
     csrfToken,
     ...(await application.getRevision()),
     capabilities: ["topics", "search", "editing", "taxonomy", "history", "trash", "publications", "health", "reindex", "live-refresh", "catalogue-inspection"]
