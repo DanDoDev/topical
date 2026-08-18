@@ -108,12 +108,14 @@ export function createHttpServer({ application, csrfToken = randomBytes(32).toSt
     version: "0.5.0-dev",
     csrfToken,
     ...(await application.getRevision()),
-    capabilities: ["topics", "search", "editing", "taxonomy", "history", "trash", "publications", "health", "reindex", "live-refresh"]
+    capabilities: ["topics", "search", "editing", "taxonomy", "history", "trash", "publications", "health", "reindex", "live-refresh", "catalogue-inspection"]
   }));
   server.get("/api/v1/revision", async () => application.getRevision());
   server.get("/api/v1/topics", endpoint(topicListQuery, (request) => request.query, (input) => application.listTopics(input)));
   server.get("/api/v1/topics/:topic/overview", endpoint(z.object({ topic }), (request) => request.params, (input) => application.getTopicOverview(input)));
   server.get("/api/v1/topic-file", endpoint(readQuery, (request) => request.query, ({ topic, path }) => application.readTopicFile({ topic, filePath: path })));
+  server.get("/api/v1/catalogues/root", endpoint(z.object({ view: z.enum(["rendered", "raw"]).default("rendered") }), (request) => request.query, (input) => application.readRootCatalogue(input)));
+  server.get("/api/v1/catalogues/topic", endpoint(z.object({ topic, view: z.enum(["rendered", "raw"]).default("rendered") }), (request) => request.query, (input) => application.readTopicCatalogue(input)));
   server.get("/api/v1/search", endpoint(searchQuery, (request) => request.query, ({ q, ...input }) => application.searchTopics({ ...input, query: q })));
   server.get("/api/v1/tags", endpoint(pagedQuery.extend({ query: z.string().max(2000).default("") }), (request) => request.query, (input) => application.listTags(input)));
   server.get("/api/v1/history", endpoint(pagedQuery.extend({ topic: topic.optional() }), (request) => request.query, (input) => application.listHistory(input)));
@@ -139,6 +141,7 @@ export function createHttpServer({ application, csrfToken = randomBytes(32).toSt
     server.register(fastifyStatic, { root });
     server.setNotFoundHandler((request, reply) => {
       if (request.url.startsWith("/api/")) return reply.code(404).send({ error: { code: "NOT_FOUND", message: "API route not found." } });
+      if (request.url.startsWith("/assets/")) return reply.code(404).type("text/plain").send("UI asset not found. Reload Topical to use the current build.");
       return reply.sendFile("index.html");
     });
   }

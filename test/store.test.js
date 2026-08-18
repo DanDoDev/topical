@@ -72,7 +72,9 @@ test("uses incremental indexes for list and search, and provides bounded topic o
   const overview = await store.getTopicOverview({ topic: "performance", maxChars: 500 });
   assert.match(overview.context, /lookup cache/);
   assert.equal(overview.files.length, 2);
+  assert.ok(overview.files.every((file) => /^\d{4}-\d{2}-\d{2}T/.test(file.updatedAt)));
   assert.ok(overview.files.every((file) => !Object.hasOwn(file, "terms")));
+  assert.equal((await store.listTopics()).topics[0].fileCount, 2);
 });
 
 test("ordinary reads do not mutate root or topic derived state", async () => {
@@ -89,12 +91,24 @@ test("ordinary reads do not mutate root or topic derived state", async () => {
   const before = await Promise.all([readFile(rootIndexPath, "utf8"), readFile(topicIndexPath, "utf8")]);
 
   await store.readTopicFile({ topic: "read-only" });
+  const rootCatalogue = await store.readRootCatalogue();
+  const rootRawCatalogue = await store.readRootCatalogue({ view: "raw" });
+  const topicCatalogue = await store.readTopicCatalogue({ topic: "read-only" });
+  const topicRawCatalogue = await store.readTopicCatalogue({ topic: "read-only", view: "raw" });
   await store.getTopicOverview({ topic: "read-only" });
   await store.listTopics();
   await store.searchTopics({ query: "read-only evidence" });
 
   const after = await Promise.all([readFile(rootIndexPath, "utf8"), readFile(topicIndexPath, "utf8")]);
   assert.deepEqual(after, before);
+  assert.equal(rootRawCatalogue.raw, before[0]);
+  assert.equal(topicRawCatalogue.raw, before[1]);
+  assert.equal(rootCatalogue.data.topics[0].id, "read-only");
+  assert.equal(topicCatalogue.data.topic.id, "read-only");
+  assert.equal(rootCatalogue.hash.length, 64);
+  assert.equal(topicCatalogue.hash.length, 64);
+  assert.equal(rootCatalogue.raw, undefined);
+  assert.equal(rootRawCatalogue.data, undefined);
 });
 
 test("long-lived stores observe external topic and search-index replacements", async (t) => {

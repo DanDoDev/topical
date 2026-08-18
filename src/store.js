@@ -24,11 +24,12 @@ import { paginate } from "./pagination.js";
 import { queryWithRelaxedFallback } from "./search-index.js";
 import { SqliteSearchIndex } from "./sqlite-search-index.js";
 
-const ROOT_INDEX_VERSION = 3;
-const TOPIC_INDEX_VERSION = 4;
+const ROOT_INDEX_VERSION = 4;
+const TOPIC_INDEX_VERSION = 5;
 const TRASH_MANIFEST_VERSION = 1;
 const MAX_RECENT_ACTIONS = 100;
 const DEFAULT_OVERVIEW_CHARS = 6_000;
+const MAX_INTERACTIVE_CATALOGUE_BYTES = 10 * 1024 * 1024;
 
 export { TopicalError } from "./errors.js";
 
@@ -434,6 +435,7 @@ export class TopicalStore {
       const target = path.join(directory, filePath);
       await assertSafeFilesystemPath(this.root, target);
       const content = await readFile(target, "utf8");
+      const details = await stat(target);
       const parsed = parseFrontmatter(content, metadata);
       const body = compactText(parsed.body);
       const headings = headingList(parsed.body);
@@ -444,6 +446,7 @@ export class TopicalStore {
         excerpt: body.slice(0, 360),
         size: Buffer.byteLength(content, "utf8"),
         hash: hash(content),
+        updatedAt: details.mtime.toISOString(),
         body
       });
     }
@@ -820,7 +823,39 @@ export class TopicalStore {
     await assertSafeFilesystemPath(this.root, target);
     if (!await exists(target)) throw new TopicalError(`File '${normalized}' does not exist in '${topic}'.`);
     const content = await readFile(target, "utf8");
-    return { topic, path: normalized, content, hash: hash(content) };
+    const details = await stat(target);
+    return { topic, path: normalized, content, hash: hash(content), updatedAt: details.mtime.toISOString() };
+  }
+
+  async readRootCatalogue({ view = "rendered" } = {}) {
+    await this.initialize();
+    return this.#readCatalogue(path.join(this.root, "index.json"), { scope: "root" }, view);
+  }
+
+  async readTopicCatalogue({ topic, view = "rendered" }) {
+    await this.initialize();
+    const directory = await this.#requireTopicDirectory(topic);
+    return this.#readCatalogue(path.join(directory, "index.json"), { scope: "topic", topic }, view);
+  }
+
+  async #readCatalogue(target, identity, view) {
+    if (view !== "rendered" && view !== "raw") throw new TopicalError("Catalogue view must be 'rendered' or 'raw'.");
+    await assertSafeFilesystemPath(this.root, target);
+    const details = await stat(target);
+    if (details.size > MAX_INTERACTIVE_CATALOGUE_BYTES) {
+      throw new TopicalError("This catalogue is too large for the interactive inspector.", {
+        code: "PAYLOAD_TOO_LARGE",
+        details: { maximumBytes: MAX_INTERACTIVE_CATALOGUE_BYTES, size: details.size }
+      });
+    }
+    const raw = await readFile(target, "utf8");
+    const result = { ...identity, size: Buffer.byteLength(raw, "utf8"), hash: hash(raw), view };
+    if (view === "raw") return { ...result, raw };
+    try {
+      return { ...result, data: JSON.parse(raw) };
+    } catch {
+      throw new TopicalError("The derived catalogue contains invalid JSON. Reindex Topical to rebuild it.");
+    }
   }
 
   async updateTopicFile({ topic, filePath = "context.md", mode = "append", content, section, description, expectedHash }) {
