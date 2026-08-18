@@ -10,7 +10,6 @@ type Notice = { kind: "error" | "success"; text: string } | null;
 type DocumentTab = { key: string; topic: string; path: string; title: string };
 type FileSort = "recent" | "name";
 
-const MAX_DOCUMENT_TABS = 12;
 const TAB_SESSION_KEY = "topical.document-tabs.v1";
 
 function documentTabKey(topic: string, path: string) { return `${topic}\u0000${path}`; }
@@ -22,10 +21,10 @@ function validStoredTab(tab: unknown): tab is DocumentTab {
     && typeof candidate.title === "string" && candidate.title.length > 0
     && candidate.key === documentTabKey(candidate.topic, candidate.path);
 }
-function loadTabSession(): { tabs: DocumentTab[]; active?: string; collapsedTopics: string[] } {
+export function loadTabSession(): { tabs: DocumentTab[]; active?: string; collapsedTopics: string[] } {
   try {
     const parsed = JSON.parse(window.sessionStorage.getItem(TAB_SESSION_KEY) || "null");
-    const tabs = Array.isArray(parsed?.tabs) ? parsed.tabs.filter(validStoredTab).slice(0, MAX_DOCUMENT_TABS) : [];
+    const tabs = Array.isArray(parsed?.tabs) ? parsed.tabs.filter(validStoredTab) : [];
     const active = tabs.some((tab: DocumentTab) => tab.key === parsed?.active) ? parsed.active : tabs[0]?.key;
     const topics = new Set(tabs.map((tab: DocumentTab) => tab.topic));
     const collapsedTopics = Array.isArray(parsed?.collapsedTopics) ? parsed.collapsedTopics.filter((topic: unknown) => typeof topic === "string" && topics.has(topic)) : [];
@@ -52,6 +51,15 @@ export function reorderTopicGroups(tabs: DocumentTab[], sourceTopic: string, tar
   order.splice(source, 1);
   order.splice(target, 0, sourceTopic);
   return order.flatMap((topic) => tabs.filter((tab) => tab.topic === topic));
+}
+
+export function topicGroupTone(topic: string) {
+  let hash = 2_166_136_261;
+  for (let index = 0; index < topic.length; index += 1) {
+    hash ^= topic.charCodeAt(index);
+    hash = Math.imul(hash, 16_777_619);
+  }
+  return (hash >>> 0) % 8;
 }
 
 export class ViewErrorBoundary extends Component<{ children: ReactNode; resetKey: string }, { error?: Error }> {
@@ -176,10 +184,6 @@ export function App() {
   const openDocument = (topic: string, path = "context.md", title?: string) => {
     const key = documentTabKey(topic, path);
     const existing = tabs.find((tab) => tab.key === key);
-    if (!existing && tabs.length >= MAX_DOCUMENT_TABS) {
-      window.alert(`Topical keeps at most ${MAX_DOCUMENT_TABS} documents open. Close a tab before opening another.`);
-      return;
-    }
     if (!existing) {
       const topicTitle = title || topics.data?.topics?.find((item: any) => item.id === topic)?.title || topic;
       setTabs((current) => [...current, { key, topic, path, title: topicTitle }]);
@@ -290,6 +294,7 @@ function DocumentTabs({ tabs, activeKey, dirtyTabs, collapsedTopics, onToggleTop
     const collapsed = collapsedTopics.includes(topic);
     return <section
       className={`tab-group ${collapsed ? "collapsed" : ""} ${draggedGroup === topic ? "dragging" : ""} ${overGroup === topic ? "drag-over" : ""}`}
+      data-group-tone={topicGroupTone(topic)}
       key={topic}
       ref={(node) => { if (node) nodes.current.set(`group:${topic}`, node); else nodes.current.delete(`group:${topic}`); }}
       draggable
@@ -345,6 +350,14 @@ export function sortTopicFiles(files: any[], sort: FileSort) {
     if (sort === "name") return left.path.localeCompare(right.path);
     return String(right.updatedAt || "").localeCompare(String(left.updatedAt || "")) || left.path.localeCompare(right.path);
   });
+}
+
+export function fileUpdatedAtParts(value: string | number | Date) {
+  const timestamp = formatEnglishDate(value, { includeTime: true });
+  const separator = timestamp.lastIndexOf(" at ");
+  return separator < 0
+    ? { date: timestamp, time: undefined }
+    : { date: timestamp.slice(0, separator), time: timestamp.slice(separator + 4) };
 }
 
 function TopicWorkspace({ api, topic, path, liveRevision, onBack, onChanged, onDirtyChange, onOpenDocument, onDeletedFile, onDeletedTopic, onTagClick }: { api: ApiClient; topic: string; path: string; liveRevision: number; onBack(): void; onChanged(): void; onDirtyChange(dirty: boolean): void; onOpenDocument(topic: string, path?: string, title?: string): void; onDeletedFile(): void; onDeletedTopic(): void; onTagClick(tag: string): void }) {
@@ -457,7 +470,7 @@ function TopicWorkspace({ api, topic, path, liveRevision, onBack, onChanged, onD
         <div className="context-heading"><span>Files</span><div className="context-actions"><button className="icon-button" aria-label="Inspect topic catalogue" title="Inspect topic catalogue" onClick={() => setShowCatalogue(true)}>{"{}"}</button><button className="icon-button" aria-label="Create supporting file" onClick={() => setShowNewFile(true)}>＋</button><button className="icon-button panel-toggle" aria-label="Hide topic sidebar" title="Hide topic sidebar" onClick={() => setShowContext(false)}>→</button></div></div>
         <label className="file-sort">Sort supporting files<select aria-label="Sort topic files" value={fileSort} onChange={(event) => setFileSort(event.target.value as FileSort)}><option value="recent">Recently updated</option><option value="name">Name A–Z</option></select></label>
         <div className="file-list">
-          {sortedFiles.map((item: any) => <button key={item.path} className={path === item.path ? "active" : ""} onClick={() => onOpenDocument(topic, item.path, metadata.title)}><span aria-hidden="true">◇</span><span className="file-label"><strong>{item.path}</strong><small>Updated {formatEnglishDate(item.updatedAt)}</small></span></button>)}
+          {sortedFiles.map((item: any) => { const updated = fileUpdatedAtParts(item.updatedAt); return <button key={item.path} className={path === item.path ? "active" : ""} onClick={() => onOpenDocument(topic, item.path, metadata.title)}><span aria-hidden="true">◇</span><span className="file-label"><strong>{item.path}</strong><small><span>Updated {updated.date}</span>{" "}{updated.time && <span>at {updated.time}</span>}</small></span></button>; })}
         </div>
         <div className="context-section"><span className="section-label">Tags</span><TagList tags={metadata.tags} onTagClick={onTagClick} /></div>
         <div className="context-section"><span className="section-label">File hash</span><code className="hash">{file.hash}</code></div>

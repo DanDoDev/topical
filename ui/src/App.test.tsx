@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import { currentHistoryPath, markdownPathForName, reorderDocumentTabs, reorderTopicGroups, sortTopicFiles, TagsView, TopicCard, ViewErrorBoundary } from "./App";
+import { currentHistoryPath, fileUpdatedAtParts, loadTabSession, markdownPathForName, reorderDocumentTabs, reorderTopicGroups, sortTopicFiles, TagsView, topicGroupTone, TopicCard, ViewErrorBoundary } from "./App";
 import type { ApiClient } from "./api";
 
 describe("management UI regressions", () => {
@@ -60,6 +60,14 @@ describe("management UI regressions", () => {
     expect(files.map((file) => file.path)).toEqual(["zeta.md", "context.md", "alpha.md"]);
   });
 
+  it("splits file update timestamps into visible date and time lines", () => {
+    expect(fileUpdatedAtParts("2026-08-17T13:08:00.000Z")).toEqual({
+      date: expect.stringMatching(/^August 17th, 2026$/),
+      time: expect.stringMatching(/^\d{1,2}:08 [AP]M$/)
+    });
+    expect(fileUpdatedAtParts("not-a-date")).toEqual({ date: "Unknown date", time: undefined });
+  });
+
   it("opens only history entries whose current file can exist", () => {
     expect(currentHistoryPath({ topic: "penguins", action: "update_file", path: "notes.md" })).toBe("notes.md");
     expect(currentHistoryPath({ topic: "penguins", action: "update_metadata" })).toBe("context.md");
@@ -76,5 +84,25 @@ describe("management UI regressions", () => {
     expect(reorderDocumentTabs(tabs, tabs[0].key, tabs[1].key).map((tab) => tab.path)).toEqual(["notes.md", "context.md", "context.md"]);
     expect(reorderDocumentTabs(tabs, tabs[0].key, tabs[2].key)).toBe(tabs);
     expect(reorderTopicGroups(tabs, "penguins", "seals").map((tab) => tab.topic)).toEqual(["seals", "penguins", "penguins"]);
+  });
+
+  it("restores more than twelve document tabs without truncating the session", () => {
+    const tabs = Array.from({ length: 16 }, (_, index) => ({
+      key: `penguins\0note-${index}.md`, topic: "penguins", path: `note-${index}.md`, title: "Penguins"
+    }));
+    window.sessionStorage.setItem("topical.document-tabs.v1", JSON.stringify({ tabs, active: tabs[15].key, collapsedTopics: [] }));
+
+    const restored = loadTabSession();
+
+    expect(restored.tabs).toHaveLength(16);
+    expect(restored.active).toBe(tabs[15].key);
+    window.sessionStorage.clear();
+  });
+
+  it("assigns stable topic-group tones", () => {
+    expect(topicGroupTone("penguins")).toBe(topicGroupTone("penguins"));
+    expect(topicGroupTone("penguins")).not.toBe(topicGroupTone("seals"));
+    expect(topicGroupTone("penguins")).toBeGreaterThanOrEqual(0);
+    expect(topicGroupTone("penguins")).toBeLessThan(8);
   });
 });

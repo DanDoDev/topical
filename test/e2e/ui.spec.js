@@ -90,9 +90,13 @@ test("browse, search, edit, and audit through the loopback UI", async ({ page })
   const activeWorkspace = page.locator(".workspace-slot:not([hidden])");
   await expect(activeWorkspace.locator(".file-list").getByRole("button", { name: /observations\.md/ })).toBeVisible();
   await expect(page.getByRole("tab", { name: /observations\.md/ })).toBeVisible();
-  await expect(page.locator(".workspace-slot:not([hidden])").getByText(/Updated August/).first()).toBeVisible();
+  const fileTimestamp = page.locator(".workspace-slot:not([hidden]) .file-label small").first();
+  await expect(fileTimestamp.getByText(/Updated August/)).toBeVisible();
+  await expect(fileTimestamp.getByText(/^at \d{1,2}:\d{2} [AP]M$/)).toBeVisible();
+  expect(await fileTimestamp.evaluate((element) => ({ children: element.childElementCount, clipped: element.scrollWidth > element.clientWidth }))).toEqual({ children: 2, clipped: false });
   const browserGroup = page.locator(".tab-group").filter({ has: page.locator(".tab-group-label", { hasText: "Browser Fixture" }) });
   const browserGroupLabel = browserGroup.locator(".tab-group-label");
+  await expect(browserGroup).toHaveAttribute("data-group-tone", /[0-7]/);
   await expect(browserGroupLabel).toHaveAttribute("aria-expanded", "true");
   const groupedTabs = browserGroup.locator(".document-tab");
   await groupedTabs.first().dragTo(groupedTabs.last());
