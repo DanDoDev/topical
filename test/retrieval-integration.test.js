@@ -131,8 +131,8 @@ test("v0.3 JSON term arrays and incompatible cache schemas migrate by rebuilding
   await migrated.initialize();
   const migratedRoot = JSON.parse(await readFile(rootIndexPath, "utf8"));
   const migratedTopic = JSON.parse(await readFile(topicIndexPath, "utf8"));
-  assert.equal(migratedRoot.version, 4);
-  assert.equal(migratedTopic.version, 5);
+  assert.equal(migratedRoot.version, 5);
+  assert.equal(migratedTopic.version, 6);
   assert.ok(migratedRoot.documents.every((document) => !Object.hasOwn(document, "terms")));
   assert.ok(migratedTopic.documents.every((document) => !Object.hasOwn(document, "terms")));
   assert.equal((await migrated.searchTopics({ query: "amethyst migration" })).topics[0]?.topic, "migration-source");
@@ -161,6 +161,7 @@ test("incremental replacement changes only the affected topic's search records",
   const { root, store } = await createStore(t);
   await store.createTopic({ title: "Changed topic", summary: "Mutation target.", tags: [], description: "Created the changed topic." });
   await store.createTopicFile({ topic: "changed-topic", filePath: "notes.md", content: "Old vermilion marker.", description: "Added the old search marker." });
+  await store.createTopicFile({ topic: "changed-topic", filePath: "untouched.md", content: "Unchanged ochre marker.", description: "Added the unchanged same-topic marker." });
   await store.createTopic({ title: "Stable topic", summary: "Must retain record identities.", tags: [], initialContent: "Stable cerulean marker.", description: "Created the stable topic." });
   const cachePath = path.join(root, ".topical-cache", "search.sqlite");
   const ids = () => {
@@ -169,6 +170,12 @@ test("incremental replacement changes only the affected topic's search records",
     finally { database.close(); }
   };
   const stableBefore = ids();
+  const unchangedId = () => {
+    const database = new Database(cachePath, { readonly: true });
+    try { return database.prepare("SELECT id FROM records WHERE topic = 'changed-topic' AND path = 'untouched.md'").pluck().get(); }
+    finally { database.close(); }
+  };
+  const unchangedBefore = unchangedId();
   const before = await store.readTopicFile({ topic: "changed-topic", filePath: "notes.md" });
   await store.updateTopicFile({
     topic: "changed-topic",
@@ -180,6 +187,7 @@ test("incremental replacement changes only the affected topic's search records",
   });
 
   assert.deepEqual(ids(), stableBefore);
+  assert.equal(unchangedId(), unchangedBefore, "unrelated files in the changed topic must retain their search record identity");
   assert.equal((await store.searchTopics({ query: "vermilion" })).topics.length, 0);
   assert.equal((await store.searchTopics({ query: "chartreuse marker" })).topics[0]?.topic, "changed-topic");
   assert.equal((await store.searchTopics({ query: "cerulean marker" })).topics[0]?.topic, "stable-topic");

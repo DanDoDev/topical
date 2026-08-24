@@ -7,6 +7,7 @@ import Fastify from "fastify";
 import { z, ZodError } from "zod";
 
 import { TopicalError } from "./errors.js";
+import { TOPICAL_VERSION } from "./version.js";
 
 const MAX_MARKDOWN_BYTES = 5 * 1024 * 1024;
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
@@ -37,6 +38,12 @@ const pagedQuery = z.object({ cursor, limit: limit() });
 
 function queryTags(value) {
   if (value === undefined || value === "") return [];
+  if (Array.isArray(value)) return value.flatMap((item) => String(item).split(",")).filter(Boolean);
+  return String(value).split(",").filter(Boolean);
+}
+
+function queryList(value) {
+  if (value === undefined || value === "") return undefined;
   if (Array.isArray(value)) return value.flatMap((item) => String(item).split(",")).filter(Boolean);
   return String(value).split(",").filter(Boolean);
 }
@@ -105,20 +112,42 @@ export function createHttpServer({ application, csrfToken = randomBytes(32).toSt
   server.setErrorHandler((error, _request, reply) => reply.code(statusFor(error)).send(errorBody(error)));
 
   server.get("/api/v1/bootstrap", async () => ({
-    version: "0.5.0",
+    version: TOPICAL_VERSION,
     csrfToken,
     ...(await application.getRevision()),
-    capabilities: ["topics", "search", "editing", "taxonomy", "history", "trash", "publications", "health", "reindex", "live-refresh", "catalogue-inspection"]
+    capabilities: ["topics", "search", "editing", "taxonomy", "history", "paged-history", "trash", "publications", "health", "reindex", "manual-refresh", "change-notifications", "catalogue-inspection", "context-analysis"]
   }));
-  server.get("/api/v1/revision", async () => application.getRevision());
+  server.get("/api/v1/revision", endpoint(z.object({ topic: topic.optional() }), (request) => request.query, (input) => application.getRevision(input)));
   server.get("/api/v1/topics", endpoint(topicListQuery, (request) => request.query, (input) => application.listTopics(input)));
-  server.get("/api/v1/topics/:topic/overview", endpoint(z.object({ topic }), (request) => request.params, (input) => application.getTopicOverview(input)));
+  server.get("/api/v1/topics/:topic/overview", endpoint(z.object({
+    topic,
+    include: z.preprocess(queryList, z.array(z.enum(["context", "files", "history", "publications"])).max(4).optional()),
+    maxChars: limit(12_000, 2_000),
+    fileCursor: cursor,
+    fileLimit: limit(100, 20),
+    fileSort: z.enum(["recent", "name", "size"]).default("recent")
+  }), (request) => ({ ...request.params, ...request.query }), (input) => application.getTopicOverview(input)));
+  server.get("/api/v1/topics/:topic/context-analysis", endpoint(z.object({ topic }), (request) => request.params, (input) => application.analyzeTopicContext(input)));
+  server.get("/api/v1/topic-files", endpoint(z.object({
+    topic,
+    query: z.string().max(2000).default(""),
+    sort: z.enum(["recent", "name", "size"]).default("recent"),
+    cursor,
+    limit: limit()
+  }), (request) => request.query, (input) => application.listTopicFiles(input)));
   server.get("/api/v1/topic-file", endpoint(readQuery, (request) => request.query, ({ topic, path }) => application.readTopicFile({ topic, filePath: path })));
   server.get("/api/v1/catalogues/root", endpoint(z.object({ view: z.enum(["rendered", "raw"]).default("rendered") }), (request) => request.query, (input) => application.readRootCatalogue(input)));
   server.get("/api/v1/catalogues/topic", endpoint(z.object({ topic, view: z.enum(["rendered", "raw"]).default("rendered") }), (request) => request.query, (input) => application.readTopicCatalogue(input)));
   server.get("/api/v1/search", endpoint(searchQuery, (request) => request.query, ({ q, ...input }) => application.searchTopics({ ...input, query: q })));
+  server.get("/api/v1/search/files", endpoint(z.object({
+    q: z.string().max(2000).default(""),
+    topic,
+    matchMode: z.enum(["strict", "relaxed", "expanded"]).default("strict"),
+    cursor,
+    limit: limit()
+  }), (request) => request.query, ({ q, ...input }) => application.searchTopicFiles({ ...input, query: q })));
   server.get("/api/v1/tags", endpoint(pagedQuery.extend({ query: z.string().max(2000).default("") }), (request) => request.query, (input) => application.listTags(input)));
-  server.get("/api/v1/history", endpoint(pagedQuery.extend({ topic: topic.optional() }), (request) => request.query, (input) => application.listHistory(input)));
+  server.get("/api/v1/history", endpoint(pagedQuery.extend({ topic: topic.optional(), action: z.string().max(100).optional(), pathQuery: z.string().max(2000).default("") }), (request) => request.query, (input) => application.listHistory(input)));
   server.get("/api/v1/trash", endpoint(pagedQuery.extend({ type: z.enum(["file", "topic"]).optional(), topic: topic.optional() }), (request) => request.query, (input) => application.listTrash(input)));
   server.get("/api/v1/health", async () => application.getSystemHealth());
   server.get("/api/v1/publications", endpoint(pagedQuery.extend({ topic: topic.optional(), includeArchived: z.preprocess((value) => value === "true", z.boolean()).default(false) }), (request) => request.query, (input) => application.listPublications(input)));

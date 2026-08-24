@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { conflictError, TopicalError } from "./errors.js";
+import { HistoryStore } from "./history-store.js";
 import {
   analyzeQuery,
   assertBoundedText,
@@ -24,11 +25,14 @@ import { paginate } from "./pagination.js";
 import { queryWithRelaxedFallback } from "./search-index.js";
 import { SqliteSearchIndex } from "./sqlite-search-index.js";
 
-const ROOT_INDEX_VERSION = 4;
-const TOPIC_INDEX_VERSION = 5;
+const ROOT_INDEX_VERSION = 5;
+const TOPIC_INDEX_VERSION = 6;
 const TRASH_MANIFEST_VERSION = 1;
 const MAX_RECENT_ACTIONS = 100;
-const DEFAULT_OVERVIEW_CHARS = 6_000;
+const MAX_REVISION_TOPICS = 20;
+const MAX_RECENT_TOPIC_ACTIONS = 12;
+const DEFAULT_OVERVIEW_CHARS = 2_000;
+const CONTEXT_ADVISORY_CHARS = 4_000;
 const MAX_INTERACTIVE_CATALOGUE_BYTES = 10 * 1024 * 1024;
 
 export { TopicalError } from "./errors.js";
@@ -250,6 +254,42 @@ function headingList(markdown) {
     .slice(0, 80);
 }
 
+function overviewFields(include) {
+  const values = include === undefined
+    ? ["context", "files"]
+    : Array.isArray(include)
+      ? include
+      : String(include).split(",");
+  const allowed = new Set(["context", "files", "history", "publications"]);
+  const fields = new Set(values.map((value) => String(value).trim()).filter(Boolean));
+  for (const field of fields) {
+    if (!allowed.has(field)) throw new TopicalError(`Unknown overview field '${field}'.`, { code: "INVALID_INPUT" });
+  }
+  return fields;
+}
+
+function sortedTopicDocuments(documents, sort = "recent") {
+  const values = [...(documents || [])];
+  return values.sort((left, right) => {
+    if (left.path === "context.md") return -1;
+    if (right.path === "context.md") return 1;
+    if (sort === "name") return left.path.localeCompare(right.path);
+    if (sort === "size") return (right.size || 0) - (left.size || 0) || left.path.localeCompare(right.path);
+    return String(right.updatedAt || "").localeCompare(String(left.updatedAt || "")) || left.path.localeCompare(right.path);
+  });
+}
+
+function localMarkdownLinks(markdown) {
+  const links = [];
+  for (const match of String(markdown || "").matchAll(/\[[^\]]*\]\(([^)]+)\)/g)) {
+    const raw = match[1].trim().replace(/^<|>$/g, "");
+    if (!raw || raw.startsWith("#") || /^[a-z][a-z0-9+.-]*:/i.test(raw)) continue;
+    const target = raw.split("#")[0].split("?")[0];
+    if (target.toLowerCase().endsWith(".md")) links.push(target);
+  }
+  return [...new Set(links)];
+}
+
 export class TopicalStore {
   #queue = Promise.resolve();
   #rootIndexCache;
@@ -257,12 +297,14 @@ export class TopicalStore {
   #rootRefreshPromise;
   #searchIndex;
   #searchIndexIdentity;
+  #historyStore;
   #initialized = false;
   #initializePromise;
 
   constructor(root) {
     if (!path.isAbsolute(root)) throw new TopicalError("TOPICAL_ROOT must be an absolute path.");
     this.root = path.resolve(root);
+    this.#historyStore = new HistoryStore(this.root);
   }
 
   async initialize() {
@@ -286,6 +328,20 @@ export class TopicalStore {
       throw new TopicalError("TOPICAL_ROOT must be a real directory, not a symbolic link or file.");
     }
     this.root = await realpath(this.root);
+    await this.#historyStore.initialize();
+    const topicDirectories = await readdir(this.root, { withFileTypes: true });
+    const legacyEvents = [];
+    for (const entry of topicDirectories) {
+      if (!entry.isDirectory() || entry.name.startsWith(".") || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(entry.name)) continue;
+      const legacyIndexPath = path.join(this.root, entry.name, "index.json");
+      await assertSafeFilesystemPath(this.root, legacyIndexPath);
+      const legacyIndex = await readJson(legacyIndexPath, null);
+      if (Array.isArray(legacyIndex?.history) && legacyIndex.history.length) {
+        legacyIndex.history.forEach((event, position) => legacyEvents.push({ topic: entry.name, event, position }));
+      }
+    }
+    legacyEvents.sort((left, right) => String(left.event.at || "").localeCompare(String(right.event.at || "")) || left.topic.localeCompare(right.topic) || left.position - right.position);
+    await this.#historyStore.importLegacyEntries(legacyEvents);
     const indexPath = path.join(this.root, "index.json");
     await assertSafeFilesystemPath(this.root, indexPath);
     let rootNeedsRebuild = false;
@@ -319,12 +375,14 @@ export class TopicalStore {
     } catch (error) {
       this.#initialized = false;
       await this.#searchIndex.close();
+      await this.#historyStore.close();
       throw error;
     }
   }
 
   async close() {
     await this.#searchIndex?.close();
+    await this.#historyStore?.close();
     this.#initialized = false;
     this.#rootIndexCache = undefined;
     this.#rootIndexStamp = undefined;
@@ -413,7 +471,7 @@ export class TopicalStore {
     const directory = this.#topicDirectory(topic);
     await this.#requireTopicDirectory(topic);
     await assertSafeFilesystemPath(this.root, path.join(directory, "index.json"));
-    return readJson(path.join(directory, "index.json"), { version: TOPIC_INDEX_VERSION, topic: { id: topic }, files: [], history: [] });
+    return readJson(path.join(directory, "index.json"), { version: TOPIC_INDEX_VERSION, topic: { id: topic }, files: [], recentHistory: [] });
   }
 
   async #requireTopicDirectory(topic) {
@@ -432,54 +490,62 @@ export class TopicalStore {
   async #buildTopicDocuments(topic, directory, files, metadata) {
     const documents = [];
     for (const filePath of files) {
-      const target = path.join(directory, filePath);
-      await assertSafeFilesystemPath(this.root, target);
-      const content = await readFile(target, "utf8");
-      const details = await stat(target);
-      const parsed = parseFrontmatter(content, metadata);
-      const body = compactText(parsed.body);
-      const headings = headingList(parsed.body);
-      documents.push({
-        topic,
-        path: filePath,
-        headings,
-        excerpt: body.slice(0, 360),
-        size: Buffer.byteLength(content, "utf8"),
-        hash: hash(content),
-        updatedAt: details.mtime.toISOString(),
-        body
-      });
+      documents.push(await this.#buildTopicDocument(topic, directory, filePath, metadata));
     }
     return documents;
   }
 
+  async #buildTopicDocument(topic, directory, filePath, metadata) {
+    const target = path.join(directory, filePath);
+    await assertSafeFilesystemPath(this.root, target);
+    const content = await readFile(target, "utf8");
+    const details = await stat(target);
+    const parsed = parseFrontmatter(content, metadata);
+    const body = compactText(parsed.body);
+    return {
+      topic,
+      path: filePath,
+      headings: headingList(parsed.body),
+      excerpt: body.slice(0, 360),
+      size: Buffer.byteLength(content, "utf8"),
+      hash: hash(content),
+      updatedAt: details.mtime.toISOString(),
+      body
+    };
+  }
+
   #topicSummary(topic, metadata, index) {
-    const lastAction = index.history?.at(-1);
+    const lastAction = index.recentHistory?.at(-1) || index.history?.at(-1);
     return {
       id: topic,
       title: metadata.title || topic,
       summary: metadata.summary || "",
       tags: metadata.tags || [],
       createdAt: metadata.createdAt || null,
-      updatedAt: metadata.updatedAt || index.updatedAt || now(),
+      updatedAt: index.updatedAt || metadata.updatedAt || now(),
       fileCount: index.files?.length || 0,
       lastAction: lastAction ? { at: lastAction.at, action: lastAction.action, description: lastAction.description } : null
     };
   }
 
-  async #upsertTopicInRoot(topic) {
-    const directory = await this.#requireTopicDirectory(topic);
-    const contextPath = path.join(directory, "context.md");
-    await assertSafeFilesystemPath(this.root, contextPath);
-    const content = await readFile(contextPath, "utf8");
-    const metadata = parseFrontmatter(content, { title: topic, summary: "", tags: [] }).metadata;
-    const index = await this.#topicIndex(topic);
+  async #upsertTopicInRoot(topic, change = {}) {
+    const index = change.index || await this.#topicIndex(topic);
+    const metadata = change.metadata || index.topic || { title: topic, summary: "", tags: [] };
     const rootIndex = await this.#getRootIndex();
     const summary = this.#topicSummary(topic, metadata, index);
-    const lastAction = index.history?.at(-1);
+    const lastAction = index.recentHistory?.at(-1) || index.history?.at(-1);
+    const existed = rootIndex.topics.some((entry) => entry.id === topic);
     rootIndex.topics = [...rootIndex.topics.filter((entry) => entry.id !== topic), summary]
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-    rootIndex.documents = [...rootIndex.documents.filter((document) => document.topic !== topic), ...(index.documents || [])];
+    if (change.documentPath) {
+      rootIndex.documents = rootIndex.documents.filter((document) => document.topic !== topic || document.path !== change.documentPath);
+      if (change.document) {
+        const { body: _body, ...catalogueDocument } = change.document;
+        rootIndex.documents.push(catalogueDocument);
+      }
+    } else if (!existed || change.replaceDocuments) {
+      rootIndex.documents = [...rootIndex.documents.filter((document) => document.topic !== topic), ...(index.documents || [])];
+    }
     if (lastAction) {
       const event = { topic, ...lastAction };
       rootIndex.recentActions = [event, ...rootIndex.recentActions]
@@ -501,28 +567,64 @@ export class TopicalStore {
     return this.#writeRootIndex(rootIndex);
   }
 
-  async #record(topic, action, filePath, description) {
+  async #record(topic, action, filePath, description, { replaceDocuments = false } = {}) {
     assertDescription(description);
     const directory = this.#topicDirectory(topic);
     const index = await this.#topicIndex(topic);
-    const event = { at: now(), action, path: filePath ?? null, description: description.trim() };
+    const event = await this.#historyStore.append({ topic, at: now(), action, path: filePath ?? null, description: description.trim() });
     index.version = TOPIC_INDEX_VERSION;
-    index.history = [...(index.history || []), event];
+    index.recentHistory = [...(index.recentHistory || index.history || []), event].slice(-MAX_RECENT_TOPIC_ACTIONS);
+    delete index.history;
     index.updatedAt = event.at;
-    index.files = await listMarkdownFiles(directory);
-    const contextPath = path.join(directory, "context.md");
-    await assertSafeFilesystemPath(this.root, contextPath);
-    const context = await readFile(contextPath, "utf8");
-    const metadata = parseFrontmatter(context, { title: topic, summary: "", tags: [] }).metadata;
+    let metadata = index.topic || { id: topic, title: topic, summary: "", tags: [] };
+    let document = null;
+    const documentPath = typeof filePath === "string" && filePath.endsWith(".md") ? filePath : null;
+    if (replaceDocuments) {
+      index.files = await listMarkdownFiles(directory);
+      const context = await readFile(path.join(directory, "context.md"), "utf8");
+      metadata = { id: topic, ...parseFrontmatter(context, metadata).metadata };
+      const searchDocuments = await this.#buildTopicDocuments(topic, directory, index.files, metadata);
+      index.documents = searchDocuments.map(({ body: _body, ...value }) => value);
+      index.topic = metadata;
+      await writeAtomic(this.root, path.join(directory, "index.json"), JSON.stringify(index, null, 2) + "\n");
+      return {
+        event,
+        change: {
+          topic: this.#topicSummary(topic, metadata, index),
+          fullTopic: { topic: this.#topicSummary(topic, metadata, index), documents: searchDocuments },
+          index,
+          metadata,
+          replaceDocuments: true
+        }
+      };
+    }
+    if (documentPath) {
+      const target = path.join(directory, documentPath);
+      await assertSafeFilesystemPath(this.root, target);
+      const present = await exists(target);
+      index.files = [...new Set([...(index.files || []).filter((value) => value !== documentPath), ...(present ? [documentPath] : [])])].sort();
+      if (present) {
+        if (documentPath === "context.md") {
+          const context = await readFile(target, "utf8");
+          metadata = { id: topic, ...parseFrontmatter(context, metadata).metadata };
+          index.topic = metadata;
+        }
+        document = await this.#buildTopicDocument(topic, directory, documentPath, metadata);
+      }
+      index.documents = [...(index.documents || []).filter((value) => value.path !== documentPath), ...(document ? [(({ body: _body, ...value }) => value)(document)] : [])]
+        .sort((left, right) => left.path.localeCompare(right.path));
+    }
     index.topic = { id: topic, ...metadata };
-    const searchDocuments = await this.#buildTopicDocuments(topic, directory, index.files, metadata);
-    index.documents = searchDocuments.map(({ body: _body, ...document }) => document);
     await writeAtomic(this.root, path.join(directory, "index.json"), JSON.stringify(index, null, 2) + "\n");
     return {
       event,
-      searchTopic: {
+      change: {
         topic: this.#topicSummary(topic, metadata, index),
-        documents: searchDocuments
+        documentPath,
+        document,
+        index,
+        metadata,
+        replaceDocuments: false
       }
     };
   }
@@ -548,16 +650,18 @@ export class TopicalStore {
       const content = await readFile(contextPath, "utf8");
       const parsed = parseFrontmatter(content, { title: topic, createdAt: undefined, updatedAt: undefined });
       const index = await this.#topicIndex(topic);
+      if (Array.isArray(index.history) && index.history.length) await this.#historyStore.importLegacy(topic, index.history);
       const files = await listMarkdownFiles(directory);
       index.version = TOPIC_INDEX_VERSION;
       index.topic = { id: topic, ...parsed.metadata };
       index.files = files;
       index.updatedAt = parsed.metadata.updatedAt || index.updatedAt || now();
-      index.history = index.history || [];
+      index.recentHistory = [...(index.recentHistory || index.history || [])].slice(-MAX_RECENT_TOPIC_ACTIONS);
+      delete index.history;
       const searchDocuments = await this.#buildTopicDocuments(topic, directory, files, parsed.metadata);
       index.documents = searchDocuments.map(({ body: _body, ...document }) => document);
       await writeAtomic(this.root, path.join(directory, "index.json"), JSON.stringify(index, null, 2) + "\n");
-      const lastAction = index.history.at(-1);
+      const lastAction = index.recentHistory.at(-1);
       if (lastAction) events.push({ topic, ...lastAction });
       documents.push(...index.documents);
       const topicSummary = this.#topicSummary(topic, parsed.metadata, index);
@@ -575,9 +679,11 @@ export class TopicalStore {
     return this.#writeRootIndex(rootIndex);
   }
 
-  async #replaceSearchTopic(searchTopic) {
+  async #applySearchChange(change) {
     try {
-      await this.#searchIndex.replace(searchTopic);
+      if (change.fullTopic) await this.#searchIndex.replace(change.fullTopic);
+      else if (change.documentPath) await this.#searchIndex.replaceDocument({ topic: change.topic, path: change.documentPath, document: change.document });
+      else await this.#searchIndex.updateTopic({ topic: change.topic });
     } catch {
       await this.#reindexUnlocked();
     }
@@ -633,9 +739,9 @@ export class TopicalStore {
   async recordPublicationAction(topic, publication, description) {
     return this.#serial(async () => {
       assertDescription(description);
-      const { event, searchTopic } = await this.#record(topic, publication.action, null, description);
+      const { event, change } = await this.#record(topic, publication.action, null, description);
       const directory = await this.#requireTopicDirectory(topic);
-      const index = await this.#topicIndex(topic);
+      const index = change.index;
       const summary = {
         id: publication.id,
         destination: publication.destination,
@@ -645,14 +751,49 @@ export class TopicalStore {
       };
       index.publications = [...(index.publications || []).filter((entry) => entry.id !== publication.id), summary];
       await writeAtomic(this.root, path.join(directory, "index.json"), JSON.stringify(index, null, 2) + "\n");
-      await this.#upsertTopicInRoot(topic);
-      await this.#replaceSearchTopic(searchTopic);
+      await this.#upsertTopicInRoot(topic, change);
+      await this.#applySearchChange(change);
       return event;
     });
   }
 
   async reindex() {
     return this.#serial(() => this.#reindexUnlocked());
+  }
+
+  async prepareV05Rollback({ confirm = false } = {}) {
+    if (!confirm) throw new TopicalError("Set confirm to true to rebuild v0.5-compatible catalogues from durable audit history.", { code: "INVALID_INPUT" });
+    return this.#serial(async () => {
+      await this.initialize();
+      const rootIndex = await this.#getRootIndex();
+      let eventCount = 0;
+      for (const summary of rootIndex.topics) {
+        const index = await this.#topicIndex(summary.id);
+        const newestFirst = [];
+        let cursor;
+        do {
+          const page = await this.#historyStore.list({ topic: summary.id, cursor, limit: 100 });
+          newestFirst.push(...page.events);
+          cursor = page.page.nextCursor;
+        } while (cursor);
+        index.version = 5;
+        index.history = newestFirst.reverse().map(({ topic: _topic, ...event }) => event);
+        delete index.recentHistory;
+        eventCount += index.history.length;
+        const directory = await this.#requireTopicDirectory(summary.id);
+        await writeAtomic(this.root, path.join(directory, "index.json"), `${JSON.stringify(index, null, 2)}\n`);
+      }
+      const legacyRoot = { ...rootIndex, version: 4 };
+      await writeAtomic(this.root, path.join(this.root, "index.json"), `${JSON.stringify(legacyRoot, null, 2)}\n`);
+      this.#rootIndexCache = undefined;
+      this.#rootIndexStamp = undefined;
+      return {
+        status: "ready_for_v0.5",
+        topics: rootIndex.topics.length,
+        events: eventCount,
+        guidance: "Stop this process before starting Topical v0.5. The durable .topical-history records remain available if this version is started again."
+      };
+    });
   }
 
   async listTopics({ sort = "recent", tags = [], cursor, limit = 50 } = {}) {
@@ -667,31 +808,40 @@ export class TopicalStore {
     return { topics: page.items, page: page.page };
   }
 
-  async listHistory({ topic, cursor, limit = 50 } = {}) {
-    let history;
-    if (topic) {
-      assertTopicId(topic);
-      try {
-        const index = await this.#topicIndex(topic);
-        history = [...(index.history || [])].reverse().map((event) => ({ topic, ...event }));
-      } catch (error) {
-        if (!(error instanceof TopicalError) || error.code !== "TOPICAL_ERROR" || !/does not exist/.test(error.message)) throw error;
-        const root = await this.#getRootIndex();
-        history = root.recentActions.filter((event) => event.topic === topic);
+  async listTopicFiles({ topic, query = "", sort = "recent", cursor, limit = 50 } = {}) {
+    assertTopicId(topic);
+    const index = await this.#topicIndex(topic);
+    const normalizedQuery = normalizeSearchText(String(query || "").trim());
+    const documents = sortedTopicDocuments(index.documents, sort)
+      .filter((document) => !normalizedQuery || normalizeSearchText([
+        document.path,
+        ...(document.headings || []),
+        document.excerpt || ""
+      ].join(" ")).includes(normalizedQuery))
+      .map((document) => ({ ...document, headings: [...(document.headings || [])] }));
+    const page = paginate(documents, { cursor, limit, maxLimit: 100 });
+    return {
+      files: page.items,
+      page: page.page,
+      summary: {
+        totalFiles: (index.documents || []).length,
+        matchedFiles: documents.length,
+        contextPath: "context.md"
       }
-    } else {
-      const index = await this.#getRootIndex();
-      history = [...index.recentActions];
-    }
-    const page = paginate(history, { cursor, limit, maxLimit: 100 });
-    return { events: page.items, page: page.page };
+    };
+  }
+
+  async listHistory({ topic, action, pathQuery, cursor, limit = 50 } = {}) {
+    if (topic) assertTopicId(topic);
+    return this.#historyStore.list({ topic, action, pathQuery, cursor, limit });
   }
 
   async getSystemHealth() {
     const index = await this.#getRootIndex();
     const search = await this.#searchIndex.health();
+    const history = await this.#historyStore.health();
     return {
-      status: search.status === "ready" ? "ready" : "degraded",
+      status: search.status === "ready" && history.status === "ready" ? "ready" : "degraded",
       markdownAuthority: true,
       catalogue: {
         rootSchemaVersion: ROOT_INDEX_VERSION,
@@ -702,13 +852,41 @@ export class TopicalStore {
         recentActions: index.recentActions.length
       },
       search,
+      history,
       rebuildRecommended: search.status !== "ready"
     };
   }
 
-  async getRevision() {
-    await this.#getRootIndex();
-    return { revision: hash(this.#rootIndexStamp || "") };
+  async getRevision({ topic } = {}) {
+    if (topic) {
+      assertTopicId(topic);
+      const directory = await this.#requireTopicDirectory(topic);
+      const indexPath = path.join(directory, "index.json");
+      await assertSafeFilesystemPath(this.root, indexPath);
+      return { scope: "topic", topic, revision: hash(`${topic}|${await fileStamp(indexPath)}`) };
+    }
+    const index = await this.#getRootIndex();
+    const titles = new Map(index.topics.map((entry) => [entry.id, entry.title]));
+    const recentChanges = [];
+    const changedTopics = new Set();
+    for (const event of index.recentActions) {
+      if (changedTopics.has(event.topic)) continue;
+      changedTopics.add(event.topic);
+      recentChanges.push({
+        id: event.id,
+        topic: event.topic,
+        title: titles.get(event.topic) || event.topic,
+        at: event.at,
+        action: event.action,
+        path: event.path ?? null
+      });
+      if (recentChanges.length === MAX_REVISION_TOPICS) break;
+    }
+    return {
+      scope: "global",
+      revision: hash(this.#rootIndexStamp || ""),
+      recentChanges
+    };
   }
 
   async listTags({ query = "", cursor, limit = 50 } = {}) {
@@ -806,10 +984,10 @@ export class TopicalStore {
       assertMarkdown(initialContent);
       await assertSafeFilesystemPath(this.root, directory);
       await writeAtomic(this.root, path.join(directory, "context.md"), formatContext({ title: cleanTitle, summary: cleanSummary, tags: normalizedTags, createdAt: timestamp, updatedAt: timestamp }, initialContent));
-      await writeAtomic(this.root, path.join(directory, "index.json"), JSON.stringify({ version: TOPIC_INDEX_VERSION, topic: { id: topic, title: cleanTitle, summary: cleanSummary, tags: normalizedTags, createdAt: timestamp, updatedAt: timestamp }, files: ["context.md"], history: [] }, null, 2) + "\n");
-      const { searchTopic } = await this.#record(topic, "create_topic", "context.md", description);
-      await this.#upsertTopicInRoot(topic);
-      await this.#replaceSearchTopic(searchTopic);
+      await writeAtomic(this.root, path.join(directory, "index.json"), JSON.stringify({ version: TOPIC_INDEX_VERSION, topic: { id: topic, title: cleanTitle, summary: cleanSummary, tags: normalizedTags, createdAt: timestamp, updatedAt: timestamp }, files: ["context.md"], recentHistory: [] }, null, 2) + "\n");
+      const { change } = await this.#record(topic, "create_topic", "context.md", description, { replaceDocuments: true });
+      await this.#upsertTopicInRoot(topic, change);
+      await this.#applySearchChange(change);
       return { topic, path: path.join(directory, "context.md") };
     });
   }
@@ -874,9 +1052,9 @@ export class TopicalStore {
       const directory = await this.#requireTopicDirectory(topic);
       await writeAtomic(this.root, path.join(directory, current.path), next);
       if (current.path === "context.md") await this.#touchContext(topic, next);
-      const { searchTopic } = await this.#record(topic, "update_file", current.path, description);
-      await this.#upsertTopicInRoot(topic);
-      await this.#replaceSearchTopic(searchTopic);
+      const { change } = await this.#record(topic, "update_file", current.path, description);
+      await this.#upsertTopicInRoot(topic, change);
+      await this.#applySearchChange(change);
       const updated = await this.readTopicFile({ topic, filePath: current.path });
       return { topic, path: current.path, hash: updated.hash };
     });
@@ -900,9 +1078,9 @@ export class TopicalStore {
       await assertSafeFilesystemPath(this.root, target);
       if (await exists(target)) throw new TopicalError(`File '${normalized}' already exists.`);
       await writeAtomic(this.root, target, content);
-      const { searchTopic } = await this.#record(topic, "create_file", normalized, description);
-      await this.#upsertTopicInRoot(topic);
-      await this.#replaceSearchTopic(searchTopic);
+      const { change } = await this.#record(topic, "create_file", normalized, description);
+      await this.#upsertTopicInRoot(topic, change);
+      await this.#applySearchChange(change);
       return { topic, path: normalized, hash: hash(content) };
     });
   }
@@ -938,9 +1116,9 @@ export class TopicalStore {
         storagePath
       };
       await this.#writeTrashManifest(container, entry);
-      const { searchTopic } = await this.#record(topic, "delete_file", normalized, description);
-      await this.#upsertTopicInRoot(topic);
-      await this.#replaceSearchTopic(searchTopic);
+      const { change } = await this.#record(topic, "delete_file", normalized, description);
+      await this.#upsertTopicInRoot(topic, change);
+      await this.#applySearchChange(change);
       return { topic, path: normalized, trash: entry };
     });
   }
@@ -962,9 +1140,9 @@ export class TopicalStore {
       };
       const directory = await this.#requireTopicDirectory(topic);
       await writeAtomic(this.root, path.join(directory, "context.md"), formatContext(metadata, parsed.body));
-      const { searchTopic } = await this.#record(topic, "update_metadata", "context.md", description);
-      await this.#upsertTopicInRoot(topic);
-      await this.#replaceSearchTopic(searchTopic);
+      const { change } = await this.#record(topic, "update_metadata", "context.md", description);
+      await this.#upsertTopicInRoot(topic, change);
+      await this.#applySearchChange(change);
       const persisted = await this.readTopicFile({ topic });
       return { topic, metadata, hash: persisted.hash };
     });
@@ -997,7 +1175,8 @@ export class TopicalStore {
         storagePath
       };
       await this.#writeTrashManifest(container, entry);
-      await this.#removeTopicFromRoot(topic, { at: entry.trashedAt, action: "delete_topic", path: null, description: description.trim() });
+      const event = await this.#historyStore.append({ topic, at: entry.trashedAt, action: "delete_topic", path: null, description: description.trim() });
+      await this.#removeTopicFromRoot(topic, event);
       await this.#removeSearchTopic(topic);
       return { topic, trash: entry };
     });
@@ -1041,9 +1220,9 @@ export class TopicalStore {
         await mkdir(path.dirname(destination), { recursive: true });
         await assertSafeFilesystemPath(this.root, destination);
         await rename(stored, destination);
-        const { searchTopic } = await this.#record(entry.topic, "restore_file", entry.path, description);
-        await this.#upsertTopicInRoot(entry.topic);
-        await this.#replaceSearchTopic(searchTopic);
+        const { change } = await this.#record(entry.topic, "restore_file", entry.path, description);
+        await this.#upsertTopicInRoot(entry.topic, change);
+        await this.#applySearchChange(change);
       } else if (entry.type === "topic") {
         const contextPath = path.join(stored, "context.md");
         await assertSafeFilesystemPath(this.root, contextPath);
@@ -1052,9 +1231,9 @@ export class TopicalStore {
         const destination = this.#topicDirectory(entry.topic);
         if (await exists(destination)) throw conflictError("The original topic ID already exists; review it before restoring.", { topic: entry.topic });
         await rename(stored, destination);
-        const { searchTopic } = await this.#record(entry.topic, "restore_topic", null, description);
-        await this.#upsertTopicInRoot(entry.topic);
-        await this.#replaceSearchTopic(searchTopic);
+        const { change } = await this.#record(entry.topic, "restore_topic", null, description, { replaceDocuments: true });
+        await this.#upsertTopicInRoot(entry.topic, change);
+        await this.#applySearchChange(change);
       } else {
         throw new TopicalError(`Trash entry '${id}' has an unsupported type.`, { code: "INTEGRITY_ERROR" });
       }
@@ -1067,26 +1246,91 @@ export class TopicalStore {
     });
   }
 
-  async getTopicOverview({ topic, maxChars = DEFAULT_OVERVIEW_CHARS }) {
+  async getTopicOverview({ topic, maxChars = DEFAULT_OVERVIEW_CHARS, include, fileCursor, fileLimit = 20, fileSort = "recent" }) {
     await this.initialize();
     const directory = await this.#requireTopicDirectory(topic);
     const rootIndex = await this.#getRootIndex();
     const summary = rootIndex.topics.find((entry) => entry.id === topic);
     if (!summary) throw new TopicalError(`Topic '${topic}' is not indexed. Run reindex_topical before requesting an overview.`);
-    const contextPath = path.join(directory, "context.md");
-    await assertSafeFilesystemPath(this.root, contextPath);
-    const context = await readFile(contextPath, "utf8");
-    const parsed = parseFrontmatter(context, summary);
+    const fields = overviewFields(include);
+    const result = {
+      topic,
+      metadata: { ...summary, tags: [...summary.tags] }
+    };
+    if (fields.has("context")) {
+      const contextPath = path.join(directory, "context.md");
+      await assertSafeFilesystemPath(this.root, contextPath);
+      const context = await readFile(contextPath, "utf8");
+      const compacted = compactText(parseFrontmatter(context, summary).body);
+      const boundedLength = Math.max(500, Math.min(Number(maxChars) || DEFAULT_OVERVIEW_CHARS, 12_000));
+      result.context = compacted.slice(0, boundedLength);
+      result.contextTruncated = compacted.length > boundedLength;
+      result.contextAdvisory = {
+        characters: compacted.length,
+        targetMaximum: CONTEXT_ADVISORY_CHARS,
+        aboveTarget: compacted.length > CONTEXT_ADVISORY_CHARS,
+        guidance: compacted.length > CONTEXT_ADVISORY_CHARS
+          ? "Keep context.md as a concise status and topic map; move substantial detail to focused supporting files."
+          : "context.md is within the advisory discovery budget."
+      };
+    }
+    let index;
+    if (fields.has("files") || fields.has("publications")) index = await this.#topicIndex(topic);
+    if (fields.has("files")) {
+      const files = sortedTopicDocuments(index.documents, fileSort)
+        .map((document) => ({ ...document, headings: [...(document.headings || [])] }));
+      const page = paginate(files, { cursor: fileCursor, limit: fileLimit, maxLimit: 100 });
+      result.files = page.items;
+      result.filePage = page.page;
+    }
+    if (fields.has("publications")) result.publications = [...(index.publications || [])];
+    if (fields.has("history")) {
+      const history = await this.#historyStore.list({ topic, limit: MAX_RECENT_TOPIC_ACTIONS });
+      result.recentHistory = history.events;
+      result.historyPage = history.page;
+    }
+    return result;
+  }
+
+  async analyzeTopicContext({ topic }) {
+    assertTopicId(topic);
+    const context = await this.readTopicFile({ topic, filePath: "context.md" });
+    const body = parseFrontmatter(context.content).body;
     const index = await this.#topicIndex(topic);
-    const boundedLength = Math.max(500, Math.min(Number(maxChars) || DEFAULT_OVERVIEW_CHARS, 12_000));
+    const knownPaths = new Set((index.documents || []).map((document) => document.path));
+    const links = localMarkdownLinks(body);
+    const brokenLinks = links.filter((target) => {
+      const normalized = path.posix.normalize(target);
+      return normalized.startsWith("../") || !knownPaths.has(normalized);
+    });
+    const headings = body.split(/\r?\n/).filter((line) => /^#{1,6}\s+\S/.test(line));
+    const datedHeadings = headings.filter((heading) => /\b(?:19|20)\d{2}\b|\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/i.test(heading));
+    const characters = body.length;
+    const findings = [];
+    if (characters > CONTEXT_ADVISORY_CHARS) findings.push({ code: "ABOVE_CONTEXT_BUDGET", severity: "advisory", message: `context.md has ${characters.toLocaleString()} body characters; the normal routing-document target is at most ${CONTEXT_ADVISORY_CHARS.toLocaleString()}.` });
+    if (headings.length > 12) findings.push({ code: "MANY_SECTIONS", severity: "advisory", message: `context.md has ${headings.length} headings and may mix long-lived routing with detailed work logs.` });
+    if (datedHeadings.length > 3) findings.push({ code: "DATED_LOG_SECTIONS", severity: "advisory", message: `${datedHeadings.length} dated headings may be better preserved in a focused implementation or handoff file.` });
+    if (brokenLinks.length) findings.push({ code: "BROKEN_TOPIC_LINKS", severity: "advisory", message: `${brokenLinks.length} local Markdown link${brokenLinks.length === 1 ? "" : "s"} do not resolve to a current topic file.` });
     return {
       topic,
-      metadata: { ...summary, tags: [...summary.tags] },
-      context: compactText(parsed.body).slice(0, boundedLength),
-      contextTruncated: compactText(parsed.body).length > boundedLength,
-      files: (index.documents || []).map((document) => ({ ...document, headings: [...(document.headings || [])] })),
-      publications: [...(index.publications || [])],
-      recentHistory: [...(index.history || [])].slice(-12).reverse()
+      mode: "analyze_only",
+      changed: false,
+      context: {
+        hash: context.hash,
+        characters,
+        lines: body ? body.split(/\r?\n/).length : 0,
+        headings: headings.length,
+        linkedTopicFiles: links.length,
+        targetRange: { minimum: 2_000, maximum: CONTEXT_ADVISORY_CHARS },
+        aboveTarget: characters > CONTEXT_ADVISORY_CHARS
+      },
+      findings,
+      details: { brokenLinks, datedHeadings: datedHeadings.slice(0, 20) },
+      guidance: [
+        "Keep context.md to purpose, current status, immediate decisions, and a concise map of focused files.",
+        "Put substantial plans, research, dated logs, and handoffs in supporting Markdown files before shortening context.md.",
+        "No content was changed. Any future optimization must be reviewed and use current hashes for every affected file."
+      ]
     };
   }
 
@@ -1121,6 +1365,37 @@ export class TopicalStore {
       matchMode: result.matchMode,
       expansions: result.expansions || [],
       topics
+    };
+  }
+
+  async searchTopicFiles({ query, topic, matchMode = "strict", cursor, limit = 50 }) {
+    assertTopicId(topic);
+    await this.initialize();
+    await this.#getRootIndex();
+    const analysis = analyzeQuery(query);
+    const sourceQuery = analysis.source;
+    const result = await this.#searchIndex.queryFiles({ query: sourceQuery, analysis, topic, matchMode, cursor, limit });
+    const directory = await this.#requireTopicDirectory(topic);
+    const files = [];
+    for (const file of result.files) {
+      const target = path.join(directory, file.path);
+      await assertSafeFilesystemPath(this.root, target);
+      if (!await exists(target)) continue;
+      const content = await readFile(target, "utf8");
+      const parsed = parseFrontmatter(content);
+      const explanation = explainFileMatch(file.path, parsed.body, file.matchedTerms, []);
+      files.push({
+        ...file,
+        ...explanation,
+        snippet: bodySnippet(parsed.body, explanation.matchedTerms.length ? explanation.matchedTerms : file.matchedTerms, sourceQuery)
+      });
+    }
+    return {
+      query: sourceQuery,
+      topic,
+      matchMode,
+      files,
+      page: result.page
     };
   }
 }

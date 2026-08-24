@@ -6,11 +6,12 @@ import { formatNodeVersionError, formatStartupError, supportsNode } from "./star
 
 function help() {
   return [
-    "Usage: topical [mcp|ui|doctor] [options]",
+    "Usage: topical [mcp|ui|doctor|prepare-v0.5-rollback] [options]",
     "",
     "Without a command, starts the Topical MCP server over stdio.",
     "doctor [--json] performs read-only startup, dependency, path, and cache checks.",
-    "ui [--port <number>] [--no-open] starts the loopback-only management UI (default port: 2223)."
+    "ui [--port <number>] [--no-open] starts the loopback-only management UI (default port: 2223).",
+    "prepare-v0.5-rollback --confirm [--json] rebuilds v0.5-compatible catalogues from durable history before a downgrade."
   ].join("\n");
 }
 
@@ -31,11 +32,12 @@ async function run() {
   const command = explicitCommand ? args[0] : "mcp";
   const commandArgs = explicitCommand ? args.slice(1) : args;
   const doctor = command === "doctor" || commandArgs.includes("--doctor");
+  const rollback = command === "prepare-v0.5-rollback";
   const json = args.includes("--json");
-  const validCommand = ["mcp", "ui", "doctor"].includes(command);
-  const allowed = command === "ui" ? ["--no-open", "--port"] : ["--doctor", "--json"];
+  const validCommand = ["mcp", "ui", "doctor", "prepare-v0.5-rollback"].includes(command);
+  const allowed = command === "ui" ? ["--no-open", "--port"] : rollback ? ["--confirm", "--json"] : ["--doctor", "--json"];
   const unknown = commandArgs.filter((argument, index) => !allowed.includes(argument) && commandArgs[index - 1] !== "--port");
-  if (!validCommand || unknown.length || (json && !doctor)) {
+  if (!validCommand || unknown.length || (json && !doctor && !rollback)) {
     process.stderr.write(`Topical cannot start: unsupported arguments: ${args.join(" ")}\n${help()}\n`);
     process.exitCode = 1;
     return;
@@ -47,6 +49,18 @@ async function run() {
       const report = await runDoctor({ cwd: process.cwd(), env: process.env });
       process.stdout.write(json ? `${JSON.stringify(report, null, 2)}\n` : `${formatDoctorReport(report)}\n`);
       if (!report.ok) process.exitCode = 1;
+      return;
+    }
+
+    if (rollback) {
+      const { loadTopicalConfig } = await import("./config.js");
+      const { TopicalStore } = await import("./store.js");
+      const { root } = await loadTopicalConfig();
+      const store = new TopicalStore(root);
+      try {
+        const result = await store.prepareV05Rollback({ confirm: commandArgs.includes("--confirm") });
+        process.stdout.write(json ? `${JSON.stringify(result, null, 2)}\n` : `Topical ${result.status}: ${result.topics} topics and ${result.events} audit events.\n${result.guidance}\n`);
+      } finally { await store.close(); }
       return;
     }
 

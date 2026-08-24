@@ -18,13 +18,27 @@ When the user says to start or create a topical, interpret that as a request to 
 
 ## Read and update safely
 
-1. Call `get_topic_overview` after selecting a topic.
+1. Call `get_topic_overview` after selecting a topic. Keep the default briefing bounded; request only the overview fields needed and follow `filePage.nextCursor` through `list_topic_files` when more descriptors are required.
 2. Read only the relevant Markdown files with `read_topic_file`.
 3. Before proposing or adding tags, call `list_tags` and prefer a small number of recurring taxonomy facets. Zero tags is normal; warnings are advisory and never authorize automatic cleanup.
 4. For a file or metadata modification, pass the reviewed file hash as `expectedHash`; stale writes return a structured `CONFLICT` error.
 5. Before deleting a file or topic, read the reviewed content and pass its hash as `expectedHash`; use `list_trash` and `restore_trash` for explicit recovery.
 6. Supply a concise description for every mutation.
 7. Follow opaque `page.nextCursor` values for additional topic, tag, history, trash, or publication results instead of assuming one response is complete.
+
+## Keep primary context thin
+
+Treat `context.md` as a routing document, not an append-only transcript. It should normally contain only the topic purpose, concise current status, immediate decisions or open questions, next actions, and links to focused supporting files.
+
+1. Read the bounded overview and topic map before opening supporting files.
+2. Read only files relevant to the current task.
+3. Update an existing focused file when the subject remains the same.
+4. Create a focused supporting file when work enters a distinct phase or would turn `context.md` into a large mixed-purpose dump. Substantial plans, research, implementation logs, dated observations, and handoffs belong there.
+5. Update `context.md` only with a concise status change or link to the focused file.
+6. Use `analyze_topic_context` for advisory size, structure, and broken-link findings. Its findings do not authorize automatic edits.
+7. Never silently delete, summarize away, or relocate the only copy of source material. Any future optimization must create or update supporting files first, then shorten `context.md` only after explicit review with current hashes.
+
+The normal `context.md` body target is approximately 2,000–4,000 characters. This is advisory: existing large topics remain valid and writes are not rejected solely for exceeding it.
 
 Do not ask for a filesystem path merely to locate existing Topical notes. If Topical MCP tools are unavailable, say that clearly and then request an alternative.
 
@@ -34,7 +48,7 @@ If Topical is enabled but its tools are missing or the connection closes during 
 
 1. Inspect the MCP startup stderr. Adding the topic directory as a workspace root does not configure or change the MCP runtime.
 2. Run the configured executable and server path with `--doctor --json`, forwarding the same `TOPICAL_ROOT` environment.
-3. Topical v0.5 requires Node 24.x. Do not rely on a desktop or IDE host resolving `node` through an interactive NVM shell; configure the absolute executable returned by `nvm which 24`.
+3. Topical v0.5 and later require Node 24.x. Do not rely on a desktop or IDE host resolving `node` through an interactive NVM shell; configure the absolute executable returned by `nvm which 24`.
 4. If dependencies or `better-sqlite3` fail to load, identify the installation form:
    - Source checkout: activate Node 24 and run `npm ci` in the Topical checkout.
    - Prebuilt install: under Node 24, reinstall a current tarball with `npm install --global ./topical-mcp-*.tgz --omit=dev`. Use the npm tarball produced by `npm pack`, not GitHub's automatic source-code archive; the npm tarball contains the compiled `ui-dist` GUI.

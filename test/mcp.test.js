@@ -23,13 +23,13 @@ test("MCP server registers and calls Topical tools over stdio", async (t) => {
   await client.connect(transport);
   t.after(async () => { await transport.close(); });
 
-  assert.equal(client.getServerVersion()?.version, "0.5.0");
+  assert.equal(client.getServerVersion()?.version, "0.6.0");
   assert.match(client.getInstructions() || "", /TOPICAL_ROOT is the shared parent directory/);
 
   const tools = await client.listTools();
   assert.deepEqual(
     tools.tools.map((tool) => tool.name).sort(),
-    ["create_topic", "create_topic_file", "delete_topic", "delete_topic_file", "forget_publication", "get_publication_status", "get_system_health", "get_topic_overview", "list_history", "list_publications", "list_tags", "list_topics", "list_trash", "publish_document", "read_publication", "read_topic_file", "reindex_topical", "restore_trash", "search_topics", "update_publication", "update_topic_file", "update_topic_metadata"].sort(),
+    ["analyze_topic_context", "create_topic", "create_topic_file", "delete_topic", "delete_topic_file", "forget_publication", "get_publication_status", "get_system_health", "get_topic_overview", "list_history", "list_publications", "list_tags", "list_topic_files", "list_topics", "list_trash", "publish_document", "read_publication", "read_topic_file", "reindex_topical", "restore_trash", "search_topic_files", "search_topics", "update_publication", "update_topic_file", "update_topic_metadata"].sort(),
     stderr.join("")
   );
   const createTopicTool = tools.tools.find((tool) => tool.name === "create_topic");
@@ -37,6 +37,7 @@ test("MCP server registers and calls Topical tools over stdio", async (t) => {
   assert.match(createTopicTool.description, /does not create a Codex task/);
   assert.match(searchTopicsTool.description, /explicit topic/);
   assert.equal(searchTopicsTool.annotations?.readOnlyHint, true);
+  assert.match(client.getInstructions() || "", /context\.md as a concise routing document/);
   assert.match(createTopicTool.inputSchema.properties.title.description, /Human title for a new Topical note folder/);
 
   const created = await client.callTool({
@@ -108,6 +109,12 @@ test("MCP server registers and calls Topical tools over stdio", async (t) => {
   const health = await client.callTool({ name: "get_system_health", arguments: {} });
   const healthBody = JSON.parse(health.content[0].text);
   assert.equal(healthBody.status, "ready");
+  assert.equal(healthBody.history.durable, true);
+
+  const contextAnalysis = await client.callTool({ name: "analyze_topic_context", arguments: { topic: "mcp-verification" } });
+  const contextAnalysisBody = JSON.parse(contextAnalysis.content[0].text);
+  assert.equal(contextAnalysisBody.mode, "analyze_only");
+  assert.equal(contextAnalysisBody.changed, false);
   assert.equal(healthBody.markdownAuthority, true);
 
   const overview = await client.callTool({ name: "get_topic_overview", arguments: { topic: "mcp-verification", maxChars: 500 } });
