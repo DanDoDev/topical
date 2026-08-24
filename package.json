@@ -1,6 +1,6 @@
 {
   "name": "topical-mcp",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "A local-first Markdown topic store exposed through MCP.",
   "type": "module",
   "bin": {
@@ -28,6 +28,8 @@
     "benchmark:v0.4": "node benchmark/run-v0.4-baseline.js",
     "prebenchmark:relevance": "node src/runtime-preflight.js",
     "benchmark:relevance": "node benchmark/run-relevance-evaluation.js",
+    "prebenchmark:context-efficiency": "node src/runtime-preflight.js",
+    "benchmark:context-efficiency": "node benchmark/run-context-efficiency-baseline.js",
     "prepack": "npm run build:ui"
   },
   "engines": {

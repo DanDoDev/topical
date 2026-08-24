@@ -1,7 +1,7 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import { currentHistoryPath, fileUpdatedAtParts, loadTabSession, markdownPathForName, reorderDocumentTabs, reorderTopicGroups, sortTopicFiles, TagsView, topicGroupTone, TopicCard, ViewErrorBoundary } from "./App";
+import { currentHistoryPath, fileUpdatedAtParts, loadTabSession, markdownPathForName, reorderDocumentTabs, reorderTopicGroups, SearchView, sortTopicFiles, TagsView, topicGroupTone, TopicCard, TopicWorkspace, ViewErrorBoundary } from "./App";
 import type { ApiClient } from "./api";
 
 describe("management UI regressions", () => {
@@ -57,6 +57,7 @@ describe("management UI regressions", () => {
     ];
     expect(sortTopicFiles(files, "recent").map((file) => file.path)).toEqual(["context.md", "alpha.md", "zeta.md"]);
     expect(sortTopicFiles(files, "name").map((file) => file.path)).toEqual(["context.md", "alpha.md", "zeta.md"]);
+    expect(sortTopicFiles(files.map((file, index) => ({ ...file, size: index })), "size").map((file) => file.path)).toEqual(["context.md", "alpha.md", "zeta.md"]);
     expect(files.map((file) => file.path)).toEqual(["zeta.md", "context.md", "alpha.md"]);
   });
 
@@ -104,5 +105,74 @@ describe("management UI regressions", () => {
     expect(topicGroupTone("penguins")).not.toBe(topicGroupTone("seals"));
     expect(topicGroupTone("penguins")).toBeGreaterThanOrEqual(0);
     expect(topicGroupTone("penguins")).toBeLessThan(8);
+  });
+
+  it("loads the selected file once and keeps the complete file browser lazy", async () => {
+    const get = vi.fn(async (requestPath: string) => {
+      if (requestPath.startsWith("/revision")) return { revision: "topic-r1" };
+      if (requestPath.startsWith("/topics/fixture/overview")) return {
+        topic: "fixture",
+        metadata: { id: "fixture", title: "Fixture topic", summary: "Bounded workspace.", tags: [] },
+        files: [{ path: "context.md", hash: "a".repeat(64), size: 20, headings: ["Fixture"], updatedAt: "2026-08-22T10:00:00.000Z" }],
+        filePage: { limit: 12, total: 2, nextCursor: "more" }
+      };
+      if (requestPath.startsWith("/topic-files")) return { files: [{ path: "context.md", hash: "a".repeat(64), size: 20, headings: ["Fixture"], updatedAt: "2026-08-22T10:00:00.000Z" }, { path: "notes/deep.md", hash: "b".repeat(64), size: 42, headings: ["Deep note"], updatedAt: "2026-08-21T10:00:00.000Z" }], page: { limit: 50, total: 2, nextCursor: null } };
+      if (requestPath.startsWith("/topic-file")) return { topic: "fixture", path: "context.md", content: "# Fixture\n", hash: "a".repeat(64) };
+      if (requestPath.startsWith("/history")) return { events: [], page: { limit: 8, total: 0, nextCursor: null } };
+      throw new Error(`Unexpected request: ${requestPath}`);
+    });
+    const api: ApiClient = { get: get as ApiClient["get"], send: vi.fn() };
+    const props = { api, topic: "fixture", path: "context.md", onBack: vi.fn(), onChanged: vi.fn(), onDirtyChange: vi.fn(), onOpenDocument: vi.fn(), onDeletedFile: vi.fn(), onDeletedTopic: vi.fn(), onTagClick: vi.fn() };
+    const view = render(<TopicWorkspace {...props} />);
+    expect(await screen.findByRole("heading", { name: "Fixture topic" })).toBeInTheDocument();
+    await waitFor(() => expect(get.mock.calls.filter(([requestPath]) => String(requestPath).startsWith("/topic-file?")).length).toBe(1));
+    expect(get.mock.calls.some(([requestPath]) => String(requestPath).startsWith("/topic-files?"))).toBe(false);
+    expect(get.mock.calls.some(([requestPath]) => String(requestPath).startsWith("/history"))).toBe(false);
+    expect(screen.getByRole("region", { name: "Topic files" })).toHaveAttribute("tabindex", "0");
+    expect(screen.getByRole("button", { name: "Files" })).toHaveAttribute("aria-haspopup", "dialog");
+
+    fireEvent.click(screen.getByRole("tab", { name: "Change history" }));
+    await waitFor(() => expect(get.mock.calls.some(([requestPath]) => String(requestPath).startsWith("/history"))).toBe(true));
+    expect(screen.getByRole("region", { name: "Recent topic changes" })).toHaveAttribute("tabindex", "0");
+    expect(screen.getByRole("button", { name: "Show all history" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Collapse topic browser" }));
+    expect(screen.queryByRole("region", { name: "Recent topic changes" })).not.toBeInTheDocument();
+    expect(screen.getByText("File hash")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: /Files 2/ }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Show all 2 files" }));
+    expect(await screen.findByRole("heading", { name: "All files in Fixture topic" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Topic file results" })).toHaveAttribute("tabindex", "0");
+    expect(await screen.findByText("notes/deep.md")).toBeInTheDocument();
+    expect(get.mock.calls.some(([requestPath]) => String(requestPath).startsWith("/topic-files?"))).toBe(true);
+    view.unmount();
+  });
+
+  it("shows each matching file as an exact search destination and lazily reveals the rest", async () => {
+    const get = vi.fn(async (requestPath: string) => {
+      if (requestPath.startsWith("/search/files")) return {
+        files: [
+          { path: "one.md", snippet: "First exact match.", matchedTerms: ["narwhal"] },
+          { path: "two.md", snippet: "Second exact match.", matchedTerms: ["narwhal"] },
+          { path: "three.md", snippet: "Third exact match.", matchedTerms: ["narwhal"] },
+          { path: "deep/four.md", snippet: "Fourth exact match.", matchedTerms: ["narwhal"] }
+        ],
+        page: { limit: 50, total: 4, nextCursor: null }
+      };
+      if (requestPath.startsWith("/search")) return {
+        matchMode: "strict", analysis: { ignoredTerms: [] }, topics: [{ topic: "ocean", title: "Ocean notes", summary: "Marine research.", tags: [], matchedFields: ["body"], fileMatchCount: 4, files: [{ path: "one.md", snippet: "First exact match.", matchedTerms: ["narwhal"] }, { path: "two.md", snippet: "Second exact match.", matchedTerms: ["narwhal"] }, { path: "three.md", snippet: "Third exact match.", matchedTerms: ["narwhal"] }] }]
+      };
+      throw new Error(`Unexpected request: ${requestPath}`);
+    });
+    const open = vi.fn();
+    render(<SearchView api={{ get: get as ApiClient["get"], send: vi.fn() }} onOpen={open} onTagClick={vi.fn()} request={{ query: "narwhal", key: 1 }} liveRevision={0} />);
+    expect(await screen.findByText("three.md")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("two.md"));
+    expect(open).toHaveBeenCalledWith("ocean", "two.md", "Ocean notes");
+    expect(get.mock.calls.filter(([requestPath]) => String(requestPath).startsWith("/search/files")).length).toBe(0);
+    fireEvent.click(screen.getByRole("button", { name: "Show all 4 matching files" }));
+    expect(await screen.findByText("deep/four.md")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("deep/four.md"));
+    expect(open).toHaveBeenCalledWith("ocean", "deep/four.md", "Ocean notes");
   });
 });

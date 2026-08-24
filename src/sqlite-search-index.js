@@ -4,6 +4,7 @@ import path from "node:path";
 
 import Database from "better-sqlite3";
 
+import { TopicalError } from "./errors.js";
 import {
   analyzeQuery,
   boundedEditDistance,
@@ -13,10 +14,10 @@ import {
 } from "./normalization.js";
 import { SearchIndex, SEARCH_MATCH_MODE } from "./search-index.js";
 
-export const SEARCH_SCHEMA_VERSION = 4;
+export const SEARCH_SCHEMA_VERSION = 5;
 const CACHE_DIRECTORY = ".topical-cache";
 const CACHE_FILENAME = "search.sqlite";
-const MAX_FILE_HITS = 2;
+const MAX_FILE_HITS = 3;
 
 function ftsToken(token) {
   return `"${String(token).replaceAll('"', '""')}"`;
@@ -28,6 +29,21 @@ function parseJson(value, fallback) {
 
 function aliasText(entries) {
   return entries.map((entry) => entry.alias).join("\n");
+}
+
+function encodeFileCursor(scope, offset) {
+  return Buffer.from(JSON.stringify({ version: 1, scope, offset }), "utf8").toString("base64url");
+}
+
+function decodeFileCursor(cursor, scope) {
+  if (!cursor) return 0;
+  try {
+    const value = JSON.parse(Buffer.from(String(cursor), "base64url").toString("utf8"));
+    if (value?.version !== 1 || value.scope !== scope || !Number.isInteger(value.offset) || value.offset < 0) throw new Error();
+    return value.offset;
+  } catch {
+    throw new TopicalError("cursor is invalid or incompatible.", { code: "INVALID_CURSOR" });
+  }
 }
 
 async function pathExists(target) {
@@ -122,7 +138,9 @@ function createSchema(database) {
       headings_json TEXT NOT NULL,
       excerpt TEXT NOT NULL,
       hash TEXT,
-      size INTEGER
+      size INTEGER,
+      updated_at TEXT,
+      body TEXT NOT NULL
     ) STRICT;
 
     CREATE INDEX records_topic_path ON records(topic, path);
@@ -194,8 +212,8 @@ function insertTopic(database, snapshot) {
   }
 
   const insertRecord = database.prepare(`
-    INSERT INTO records(record_key, kind, topic, path, headings_json, excerpt, hash, size)
-    VALUES (@recordKey, @kind, @topic, @path, @headingsJson, @excerpt, @hash, @size)
+    INSERT INTO records(record_key, kind, topic, path, headings_json, excerpt, hash, size, updated_at, body)
+    VALUES (@recordKey, @kind, @topic, @path, @headingsJson, @excerpt, @hash, @size, @updatedAt, @body)
   `);
   const insertSearch = database.prepare(`
     INSERT INTO search(rowid, title, summary, tags, path, headings, body, aliases)
@@ -214,7 +232,9 @@ function insertTopic(database, snapshot) {
     headingsJson: "[]",
     excerpt: "",
     hash: null,
-    size: null
+    size: null,
+    updatedAt: null,
+    body: ""
   });
   const metadataAliasEntries = technicalAliasEntries([topic.title, topic.summary, ...(topic.tags || [])].join("\n"));
   const topicAliasEntries = [...metadataAliasEntries];
@@ -256,7 +276,9 @@ function insertTopic(database, snapshot) {
       headingsJson: JSON.stringify(document.headings || []),
       excerpt: document.excerpt || "",
       hash: document.hash || null,
-      size: document.size ?? null
+      size: document.size ?? null,
+      updatedAt: document.updatedAt || null,
+      body: document.body || ""
     });
     insertSearch.run({
       rowid: record.lastInsertRowid,
@@ -284,6 +306,76 @@ function insertTopic(database, snapshot) {
     for (const term of entry.alias.match(/[\p{L}\p{N}]+/gu) || []) {
       insertAliasTerm.run(topic.id, normalizeSearchText(term));
     }
+  }
+}
+
+function updateTopicMetadataRows(database, topic, fileCount) {
+  database.prepare(`
+    UPDATE topics
+    SET title = @title, summary = @summary, tags_json = @tagsJson, created_at = @createdAt,
+        updated_at = @updatedAt, file_count = @fileCount, last_action_json = @lastActionJson
+    WHERE topic = @id
+  `).run({
+    id: topic.id,
+    title: topic.title || topic.id,
+    summary: topic.summary || "",
+    tagsJson: JSON.stringify(topic.tags || []),
+    createdAt: topic.createdAt || null,
+    updatedAt: topic.updatedAt || new Date(0).toISOString(),
+    fileCount,
+    lastActionJson: topic.lastAction ? JSON.stringify(topic.lastAction) : null
+  });
+  database.prepare("DELETE FROM topic_tags WHERE topic = ?").run(topic.id);
+  const insertTag = database.prepare("INSERT OR IGNORE INTO topic_tags(topic, tag, display_tag) VALUES (?, ?, ?)");
+  for (const displayTag of topic.tags || []) insertTag.run(topic.id, canonicalTagKey(displayTag), String(displayTag));
+
+  const topicRow = database.prepare("SELECT id FROM records WHERE topic = ? AND kind = 'topic'").get(topic.id);
+  if (!topicRow) throw new Error(`Search topic '${topic.id}' is missing its topic record.`);
+  database.prepare("DELETE FROM search WHERE rowid = ?").run(topicRow.id);
+  const metadataAliases = technicalAliasEntries([topic.title, topic.summary, ...(topic.tags || [])].join("\n"));
+  database.prepare(`INSERT INTO search(rowid, title, summary, tags, path, headings, body, aliases) VALUES (?, ?, ?, ?, '', '', '', ?)`)
+    .run(topicRow.id, topic.title || topic.id, topic.summary || "", (topic.tags || []).join(" "), aliasText(metadataAliases));
+  return topicRow.id;
+}
+
+function replaceDocumentRows(database, topic, documentPath, document) {
+  const current = database.prepare("SELECT id FROM records WHERE topic = ? AND kind = 'document' AND path = ?").get(topic, documentPath);
+  if (current) {
+    database.prepare("DELETE FROM search WHERE rowid = ?").run(current.id);
+    database.prepare("DELETE FROM records WHERE id = ?").run(current.id);
+  }
+  if (!document) return;
+  const aliases = [...technicalAliasEntries(document.path), ...technicalAliasEntries([...(document.headings || []), document.body || ""].join("\n"))].slice(0, 200);
+  const record = database.prepare(`
+    INSERT INTO records(record_key, kind, topic, path, headings_json, excerpt, hash, size, updated_at, body)
+    VALUES (?, 'document', ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(`document:${topic}:${document.path}`, topic, document.path, JSON.stringify(document.headings || []), document.excerpt || "", document.hash || null, document.size ?? null, document.updatedAt || null, document.body || "");
+  database.prepare(`INSERT INTO search(rowid, title, summary, tags, path, headings, body, aliases) VALUES (?, '', '', '', ?, ?, ?, ?)`)
+    .run(record.lastInsertRowid, document.path, (document.headings || []).join("\n"), document.body || "", aliasText(aliases));
+}
+
+function refreshTopicAggregate(database, topic, topicRowId) {
+  const documents = database.prepare("SELECT path, headings_json, body FROM records WHERE topic = ? AND kind = 'document' ORDER BY path").all(topic.id);
+  const metadataAliases = technicalAliasEntries([topic.title, topic.summary, ...(topic.tags || [])].join("\n"));
+  const topicAliases = [...metadataAliases];
+  const explanationAliases = [...metadataAliases];
+  const paths = [];
+  const headings = [];
+  const bodies = [];
+  for (const document of documents) {
+    const documentHeadings = parseJson(document.headings_json, []);
+    paths.push(document.path); headings.push(...documentHeadings); bodies.push(document.body || "");
+    const aliases = [...technicalAliasEntries(document.path), ...technicalAliasEntries([...documentHeadings, document.body || ""].join("\n"))].slice(0, 200);
+    for (const entry of aliases) { if (topicAliases.length >= 200) break; topicAliases.push(entry); }
+    for (const entry of aliases) { if (explanationAliases.length >= 200) break; explanationAliases.push(entry); }
+  }
+  database.prepare("DELETE FROM topic_search WHERE rowid = ?").run(topicRowId);
+  database.prepare(`INSERT INTO topic_search(rowid, title, summary, tags, path, headings, body, aliases) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(topicRowId, topic.title || topic.id, topic.summary || "", (topic.tags || []).join(" "), paths.join("\n"), headings.join("\n"), bodies.join("\n"), aliasText(topicAliases));
+  database.prepare("DELETE FROM topic_alias_terms WHERE topic = ?").run(topic.id);
+  const insertAliasTerm = database.prepare("INSERT OR IGNORE INTO topic_alias_terms(topic, term) VALUES (?, ?)");
+  for (const entry of explanationAliases) {
+    for (const term of entry.alias.match(/[\p{L}\p{N}]+/gu) || []) insertAliasTerm.run(topic.id, normalizeSearchText(term));
   }
 }
 
@@ -409,6 +501,33 @@ export class SqliteSearchIndex extends SearchIndex {
       insertTopic(database, value);
       database.prepare("UPDATE metadata SET value = ? WHERE key = 'built_at'").run(new Date().toISOString());
     })(snapshot);
+    return this.health();
+  }
+
+  async replaceDocument({ topic, path: documentPath, document }) {
+    await this.#inspect();
+    const database = this.#requireReady();
+    database.transaction(() => {
+      if (!database.prepare("SELECT 1 FROM topics WHERE topic = ?").get(topic.id)) throw new Error(`Search topic '${topic.id}' is missing.`);
+      replaceDocumentRows(database, topic.id, documentPath, document);
+      const fileCount = Number(database.prepare("SELECT COUNT(*) FROM records WHERE topic = ? AND kind = 'document'").pluck().get(topic.id));
+      const topicRowId = updateTopicMetadataRows(database, topic, fileCount);
+      refreshTopicAggregate(database, topic, topicRowId);
+      database.prepare("UPDATE metadata SET value = ? WHERE key = 'built_at'").run(new Date().toISOString());
+    })();
+    return this.health();
+  }
+
+  async updateTopic({ topic }) {
+    await this.#inspect();
+    const database = this.#requireReady();
+    database.transaction(() => {
+      if (!database.prepare("SELECT 1 FROM topics WHERE topic = ?").get(topic.id)) throw new Error(`Search topic '${topic.id}' is missing.`);
+      const fileCount = Number(database.prepare("SELECT COUNT(*) FROM records WHERE topic = ? AND kind = 'document'").pluck().get(topic.id));
+      const topicRowId = updateTopicMetadataRows(database, topic, fileCount);
+      refreshTopicAggregate(database, topic, topicRowId);
+      database.prepare("UPDATE metadata SET value = ? WHERE key = 'built_at'").run(new Date().toISOString());
+    })();
     return this.health();
   }
 
@@ -577,9 +696,9 @@ export class SqliteSearchIndex extends SearchIndex {
     const rawFileHits = [];
     const hitCounts = new Map();
     for (const row of fileHitQuery.all(fileExpression, ...finalistByTopic.keys())) {
-      const count = hitCounts.get(row.topic) || 0;
-      if (count >= MAX_FILE_HITS) continue;
-      hitCounts.set(row.topic, count + 1);
+      const count = (hitCounts.get(row.topic) || 0) + 1;
+      hitCounts.set(row.topic, count);
+      if (count > MAX_FILE_HITS) continue;
       rawFileHits.push(row);
     }
     const filePlaceholders = rawFileHits.map(() => "?").join(", ");
@@ -629,6 +748,7 @@ export class SqliteSearchIndex extends SearchIndex {
           aliasMatchedTerms: [...topic.aliasMatchedTerms],
           matchedTerms: [...topic.matchedTerms],
           matchedFields: [...topic.matchedFields],
+          fileMatchCount: hitCounts.get(topic.topic) || 0,
           files: files.map((file) => ({
             ...file,
             matchedTerms: [...file.matchedTerms],
@@ -639,6 +759,68 @@ export class SqliteSearchIndex extends SearchIndex {
       })
       .sort((left, right) => right.score - left.score || right.updatedAt.localeCompare(left.updatedAt) || left.topic.localeCompare(right.topic))
       .map(({ updatedAt: _updatedAt, ...topic }) => topic);
+  }
+
+  async queryFiles({ query, analysis, topic, matchMode = SEARCH_MATCH_MODE.STRICT, cursor, limit = 50 }) {
+    await this.#inspect();
+    const database = this.#requireReady();
+    let queryAnalysis = analysis || analyzeQuery(query);
+    if (matchMode === SEARCH_MATCH_MODE.EXPANDED) {
+      queryAnalysis = this.#expandedAnalysis(database, queryAnalysis);
+      if (!queryAnalysis) return { files: [], page: { limit: Math.max(1, Math.min(Number(limit) || 50, 100)), total: 0, nextCursor: null } };
+    }
+    const terms = queryAnalysis.terms;
+    const boundedLimit = Math.max(1, Math.min(Number(limit) || 50, 100));
+    const scope = JSON.stringify({ topic, query: queryAnalysis.normalized, matchMode });
+    const offset = decodeFileCursor(cursor, scope);
+    if (!terms.length) {
+      const total = Number(database.prepare("SELECT COUNT(*) FROM records WHERE topic = ? AND kind = 'document'").pluck().get(topic));
+      const rows = database.prepare(`
+        SELECT id, path, hash
+        FROM records
+        WHERE topic = ? AND kind = 'document'
+        ORDER BY path
+        LIMIT ? OFFSET ?
+      `).all(topic, boundedLimit, offset);
+      return {
+        files: rows.map((row) => ({ path: row.path, hash: row.hash, score: 0, matchedTerms: [], matchedFields: [] })),
+        page: { limit: boundedLimit, total, nextCursor: offset + rows.length < total ? encodeFileCursor(scope, offset + rows.length) : null }
+      };
+    }
+    const expression = terms.map((term) => ftsToken(term.source)).join(" OR ");
+    const total = Number(database.prepare(`
+      SELECT COUNT(*)
+      FROM search JOIN records ON records.id = search.rowid
+      WHERE search MATCH ? AND records.topic = ? AND records.kind = 'document'
+    `).pluck().get(expression, topic));
+    const rows = database.prepare(`
+      SELECT records.id, records.path, records.hash,
+             bm25(search, 10.0, 7.0, 6.0, 4.0, 5.0, 1.0, 0.5) AS rank
+      FROM search JOIN records ON records.id = search.rowid
+      WHERE search MATCH ? AND records.topic = ? AND records.kind = 'document'
+      ORDER BY rank, records.path
+      LIMIT ? OFFSET ?
+    `).all(expression, topic, boundedLimit, offset);
+    const rowIds = rows.map((row) => row.id);
+    const placeholders = rowIds.map(() => "?").join(", ");
+    const matching = rowIds.length
+      ? database.prepare(`SELECT rowid FROM search WHERE search MATCH ? AND rowid IN (${placeholders})`).pluck()
+      : null;
+    const termRows = terms.map((term) => new Set(matching ? matching.all(ftsToken(term.source), ...rowIds) : []));
+    return {
+      files: rows.map((row) => ({
+        path: row.path,
+        hash: row.hash,
+        score: Number(Math.max(0, -Number(row.rank || 0) * 1000).toFixed(6)),
+        matchedTerms: terms.filter((_term, index) => termRows[index].has(row.id)).map((term) => term.normalized),
+        matchedFields: []
+      })),
+      page: {
+        limit: boundedLimit,
+        total,
+        nextCursor: offset + rows.length < total ? encodeFileCursor(scope, offset + rows.length) : null
+      }
+    };
   }
 
   async health() {

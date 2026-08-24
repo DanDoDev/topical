@@ -32,16 +32,19 @@ export class TopicalApplication {
   }
 
   searchTopics(input) { return this.store.searchTopics(input); }
+  searchTopicFiles(input) { return this.store.searchTopicFiles(input); }
   listTopics(input) { return this.store.listTopics(input); }
+  listTopicFiles(input) { return this.store.listTopicFiles(input); }
   listTags(input) { return this.store.listTags(input); }
   listHistory(input) { return this.store.listHistory(input); }
   getSystemHealth() { return this.store.getSystemHealth(); }
-  getRevision() { return this.store.getRevision(); }
+  getRevision(input) { return this.store.getRevision(input); }
   createTopic(input) { return this.store.createTopic(input); }
   readTopicFile(input) { return this.store.readTopicFile(input); }
   readRootCatalogue(input) { return this.store.readRootCatalogue(input); }
   readTopicCatalogue(input) { return this.store.readTopicCatalogue(input); }
   getTopicOverview(input) { return this.store.getTopicOverview(input); }
+  analyzeTopicContext(input) { return this.store.analyzeTopicContext(input); }
   updateTopicFile(input) { return this.store.updateTopicFile(input); }
   createTopicFile(input) { return this.store.createTopicFile(input); }
   deleteTopicFile(input) { return this.store.deleteTopicFile(input); }

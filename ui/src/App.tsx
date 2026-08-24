@@ -1,4 +1,4 @@
-import { Component, FormEvent, ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Component, FormEvent, ReactNode, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 
 import { ApiClient, ApiError, connectApi, queryString } from "./api";
 import { formatEnglishDate } from "./dates";
@@ -8,7 +8,8 @@ import { MarkdownView } from "./MarkdownView";
 type View = "topics" | "search" | "tags" | "history" | "trash" | "publications" | "system";
 type Notice = { kind: "error" | "success"; text: string } | null;
 type DocumentTab = { key: string; topic: string; path: string; title: string };
-type FileSort = "recent" | "name";
+type FileSort = "recent" | "name" | "size";
+type RevisionChange = { id?: string; topic?: string; title?: string; at?: string; action?: string; path?: string | null };
 
 const TAB_SESSION_KEY = "topical.document-tabs.v1";
 
@@ -87,7 +88,7 @@ function useLoad<T>(loader: (() => Promise<T>) | null, dependencies: unknown[]) 
   const [state, setState] = useState<{ data?: T; error?: string; loading: boolean }>({ loading: Boolean(loader) });
   useEffect(() => {
     let active = true;
-    if (!loader) { setState({ loading: false }); return; }
+    if (!loader) { setState((current) => ({ ...current, loading: false })); return; }
     setState((current) => ({ ...current, loading: true, error: undefined }));
     loader().then((data) => active && setState({ data, loading: false })).catch((error) => active && setState({ error: errorMessage(error), loading: false }));
     return () => { active = false; };
@@ -95,21 +96,41 @@ function useLoad<T>(loader: (() => Promise<T>) | null, dependencies: unknown[]) 
   return state;
 }
 
-function useStoreRevision(api: ApiClient | undefined, initialRevision: string | undefined) {
-  const [revision, setRevision] = useState(0);
-  const lastSeen = useRef(initialRevision);
-  useEffect(() => { if (initialRevision) lastSeen.current = initialRevision; }, [initialRevision]);
+function revisionChangeKey(change: RevisionChange) {
+  return change.id || [change.topic, change.at, change.action, change.path].join("|");
+}
+
+function useStoreUpdates(api: ApiClient | undefined, initialRevision?: string, initialChanges: RevisionChange[] = []) {
+  const [appliedRevision, setAppliedRevision] = useState(0);
+  const [pendingChanges, setPendingChanges] = useState<RevisionChange[]>([]);
+  const observedRevision = useRef(initialRevision);
+  const seenChanges = useRef(new Set(initialChanges.map(revisionChangeKey)));
+  useEffect(() => {
+    if (!initialRevision || observedRevision.current) return;
+    observedRevision.current = initialRevision;
+    initialChanges.forEach((change) => seenChanges.current.add(revisionChangeKey(change)));
+  }, [initialRevision, initialChanges]);
   useEffect(() => {
     if (!api) return;
     let active = true;
     let checking = false;
     const check = async () => {
-      if (checking || !active) return;
+      if (checking || !active || document.visibilityState === "hidden") return;
       checking = true;
       try {
-        const current = await api.get<{ revision: string }>("/revision");
-        if (lastSeen.current && current.revision !== lastSeen.current) setRevision((value) => value + 1);
-        lastSeen.current = current.revision;
+        const current = await api.get<{ revision: string; recentChanges?: RevisionChange[] }>("/revision");
+        const changes = current.recentChanges || [];
+        const unseen = changes.filter((change) => !seenChanges.current.has(revisionChangeKey(change)));
+        changes.forEach((change) => seenChanges.current.add(revisionChangeKey(change)));
+        if (observedRevision.current && current.revision !== observedRevision.current) {
+          const additions = unseen.length ? unseen : [{ title: "Topical catalogue", action: "external_change" }];
+          setPendingChanges((existing) => {
+            const byTopic = new Map(existing.map((change) => [change.topic || "__global", change]));
+            additions.forEach((change) => { if (!byTopic.has(change.topic || "__global")) byTopic.set(change.topic || "__global", change); });
+            return [...byTopic.values()];
+          });
+        }
+        observedRevision.current = current.revision;
       } catch {
         // The next interval or focus event retries without disrupting the active view.
       } finally { checking = false; }
@@ -127,7 +148,30 @@ function useStoreRevision(api: ApiClient | undefined, initialRevision: string | 
       document.removeEventListener("visibilitychange", visible);
     };
   }, [api]);
-  return revision;
+  const acknowledge = useCallback(async () => {
+    if (!api) return;
+    try {
+      const current = await api.get<{ revision: string; recentChanges?: RevisionChange[] }>("/revision");
+      observedRevision.current = current.revision;
+      (current.recentChanges || []).forEach((change) => seenChanges.current.add(revisionChangeKey(change)));
+    } catch {
+      // Polling will reconcile the revision later.
+    }
+  }, [api]);
+  const apply = useCallback(() => {
+    const pagePosition = { x: window.scrollX, y: window.scrollY };
+    const sidebar = document.querySelector<HTMLElement>(".sidebar");
+    const sidebarPosition = sidebar?.scrollTop;
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    setPendingChanges([]);
+    setAppliedRevision((value) => value + 1);
+    window.requestAnimationFrame(() => {
+      window.scrollTo(pagePosition.x, pagePosition.y);
+      if (sidebar && sidebarPosition !== undefined) sidebar.scrollTop = sidebarPosition;
+      window.requestAnimationFrame(() => window.scrollTo(pagePosition.x, pagePosition.y));
+    });
+  }, []);
+  return { appliedRevision, pendingChanges, apply, acknowledge };
 }
 
 export function App() {
@@ -151,7 +195,8 @@ export function App() {
     connectApi().then(({ api: connected, bootstrap: info }) => { setApi(connected); setBootstrap(info); }).catch((error) => setConnectionError(errorMessage(error)));
   }, []);
 
-  const liveRevision = useStoreRevision(api, bootstrap?.revision);
+  const storeUpdates = useStoreUpdates(api, bootstrap?.revision, bootstrap?.recentChanges || []);
+  const liveRevision = storeUpdates.appliedRevision;
   const topics = useLoad<any>(api ? () => api.get(`/topics${queryString({ sort: "recent", limit: 100, tags: topicTags })}`) : null, [api, topicsRevision, liveRevision, topicTags]);
 
   useEffect(() => {
@@ -215,6 +260,7 @@ export function App() {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand"><span className="brand-mark">T</span><div><strong>Topical</strong><small>Local knowledge</small></div></div>
+        {storeUpdates.pendingChanges.length > 0 && <StoreUpdateNotice changes={storeUpdates.pendingChanges} onRefresh={storeUpdates.apply} />}
         <form className="sidebar-search" onSubmit={searchFromSidebar} role="search">
           <span aria-hidden="true">⌕</span>
           <input aria-label="Search Topical" placeholder="Search…" value={sidebarQuery} onChange={(event) => setSidebarQuery(event.target.value)} />
@@ -247,7 +293,7 @@ export function App() {
           {!topics.loading && !topics.data?.topics?.length && <EmptyState title="No topics yet" detail="Create the first Markdown-backed topic." />}
         </main>
       )}
-      {tabs.map((tab) => <div className="workspace-slot" hidden={view !== "topics" || showTopicList || activeTabKey !== tab.key} key={tab.key}><TopicWorkspace api={api} topic={tab.topic} path={tab.path} liveRevision={liveRevision} onBack={() => setShowTopicList(true)} onChanged={() => setTopicsRevision((value) => value + 1)} onDirtyChange={(dirty) => reportDirty(tab.key, dirty)} onOpenDocument={openDocument} onDeletedFile={() => { closeTab(tab.key, true); openDocument(tab.topic); }} onDeletedTopic={() => { closeTopicTabs(tab.topic); setTopicsRevision((value) => value + 1); }} onTagClick={openTag} /></div>)}
+      {tabs.map((tab) => { const active = view === "topics" && !showTopicList && activeTabKey === tab.key; return <div className="workspace-slot" hidden={!active} key={tab.key}><TopicWorkspace api={api} topic={tab.topic} path={tab.path} active={active} refreshRevision={liveRevision} onBack={() => setShowTopicList(true)} onChanged={() => { setTopicsRevision((value) => value + 1); void storeUpdates.acknowledge(); }} onDirtyChange={(dirty) => reportDirty(tab.key, dirty)} onOpenDocument={openDocument} onDeletedFile={() => { closeTab(tab.key, true); openDocument(tab.topic); }} onDeletedTopic={() => { closeTopicTabs(tab.topic); setTopicsRevision((value) => value + 1); void storeUpdates.acknowledge(); }} onTagClick={openTag} /></div>; })}
       {view === "search" && <SearchView api={api} liveRevision={liveRevision} request={searchRequest} onOpen={openDocument} onTagClick={openTag} />}
       {view === "tags" && <TagsView api={api} liveRevision={liveRevision} onTagClick={openTag} />}
       {view === "history" && <HistoryView api={api} liveRevision={liveRevision} onOpenFile={openDocument} />}
@@ -256,7 +302,7 @@ export function App() {
       {view === "system" && <SystemView api={api} liveRevision={liveRevision} />}
       </ViewErrorBoundary>
       </div>
-      {showCreate && <CreateTopic api={api} onClose={() => setShowCreate(false)} onCreated={(topic: string) => { setShowCreate(false); setTopicsRevision((value) => value + 1); openDocument(topic); }} />}
+      {showCreate && <CreateTopic api={api} onClose={() => setShowCreate(false)} onCreated={(topic: string) => { setShowCreate(false); setTopicsRevision((value) => value + 1); void storeUpdates.acknowledge(); openDocument(topic); }} />}
     </div>
   );
 }
@@ -327,6 +373,21 @@ function NavButton({ active, icon, children, onClick }: { active: boolean; icon:
   return <button className={`nav-button ${active ? "active" : ""}`} onClick={onClick}><span>{icon}</span>{children}</button>;
 }
 
+function StoreUpdateNotice({ changes, onRefresh }: { changes: RevisionChange[]; onRefresh(): void }) {
+  const detailId = useId();
+  const visible = changes.slice(0, 6);
+  return <section className="store-update-notice" aria-label="Topical updates available">
+    <button className="store-update-trigger" aria-describedby={detailId}><span aria-hidden="true">↻</span><strong>Updates available</strong><small>{changes.length}</small></button>
+    <div className="store-update-popover" id={detailId}>
+      <strong>{changes.length === 1 ? "One topic changed" : `${changes.length} topics changed`}</strong>
+      <ul>{visible.map((change, index) => <li key={revisionChangeKey(change) || index}><span>{change.title || change.topic || "Topical catalogue"}</span>{change.path && <small>{change.path}</small>}</li>)}</ul>
+      {changes.length > visible.length && <p>And {changes.length - visible.length} more.</p>}
+      <button className="primary" onClick={onRefresh}>Refresh without moving</button>
+    </div>
+    <span className="visually-hidden" aria-live="polite">{changes.length} Topical update{changes.length === 1 ? " is" : "s are"} waiting to be refreshed.</span>
+  </section>;
+}
+
 function PageHeader({ eyebrow, title, subtitle, actions }: { eyebrow: ReactNode; title: string; subtitle?: string; actions?: ReactNode }) {
   return <header className="page-header"><div><small>{eyebrow}</small><h1>{title}</h1>{subtitle && <p>{subtitle}</p>}</div><div className="header-actions">{actions}</div></header>;
 }
@@ -348,6 +409,7 @@ export function sortTopicFiles(files: any[], sort: FileSort) {
     if (left.path === "context.md") return -1;
     if (right.path === "context.md") return 1;
     if (sort === "name") return left.path.localeCompare(right.path);
+    if (sort === "size") return Number(right.size || 0) - Number(left.size || 0) || left.path.localeCompare(right.path);
     return String(right.updatedAt || "").localeCompare(String(left.updatedAt || "")) || left.path.localeCompare(right.path);
   });
 }
@@ -360,9 +422,13 @@ export function fileUpdatedAtParts(value: string | number | Date) {
     : { date: timestamp.slice(0, separator), time: timestamp.slice(separator + 4) };
 }
 
-function TopicWorkspace({ api, topic, path, liveRevision, onBack, onChanged, onDirtyChange, onOpenDocument, onDeletedFile, onDeletedTopic, onTagClick }: { api: ApiClient; topic: string; path: string; liveRevision: number; onBack(): void; onChanged(): void; onDirtyChange(dirty: boolean): void; onOpenDocument(topic: string, path?: string, title?: string): void; onDeletedFile(): void; onDeletedTopic(): void; onTagClick(tag: string): void }) {
+export function TopicWorkspace({ api, topic, path, active = true, refreshRevision = 0, onBack, onChanged, onDirtyChange, onOpenDocument, onDeletedFile, onDeletedTopic, onTagClick }: { api: ApiClient; topic: string; path: string; active?: boolean; refreshRevision?: number; onBack(): void; onChanged(): void; onDirtyChange(dirty: boolean): void; onOpenDocument(topic: string, path?: string, title?: string): void; onDeletedFile(): void; onDeletedTopic(): void; onTagClick(tag: string): void }) {
   const [revision, setRevision] = useState(0);
-  const overview = useLoad<any>(() => api.get(`/topics/${encodeURIComponent(topic)}/overview`), [api, topic, revision, liveRevision]);
+  const [fileSort, setFileSort] = useState<FileSort>(() => {
+    const stored = window.localStorage.getItem("topical.file-sort");
+    return stored === "name" || stored === "size" ? stored : "recent";
+  });
+  const overview = useLoad<any>(active ? () => api.get(`/topics/${encodeURIComponent(topic)}/overview${queryString({ include: "files", fileLimit: 12, fileSort })}`) : null, [api, topic, revision, refreshRevision, fileSort, active]);
   const [file, setFile] = useState<any>();
   const [draft, setDraft] = useState("");
   const [editing, setEditing] = useState(false);
@@ -372,9 +438,14 @@ function TopicWorkspace({ api, topic, path, liveRevision, onBack, onChanged, onD
   const [showMetadata, setShowMetadata] = useState(false);
   const [showNewFile, setShowNewFile] = useState(false);
   const [showCatalogue, setShowCatalogue] = useState(false);
+  const [showAllFiles, setShowAllFiles] = useState(false);
+  const [showAllHistory, setShowAllHistory] = useState(false);
+  const [sidebarBrowser, setSidebarBrowser] = useState<"files" | "history">("files");
+  const [sidebarBrowserCollapsed, setSidebarBrowserCollapsed] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<"file" | "topic">();
   const [showContext, setShowContext] = useState(true);
-  const [fileSort, setFileSort] = useState<FileSort>(() => window.localStorage.getItem("topical.file-sort") === "name" ? "name" : "recent");
+  const sidebarFilesId = useId();
+  const sidebarHistoryId = useId();
   const preview = useRef<HTMLDivElement>(null);
   const fileRef = useRef<any>(undefined);
   const draftRef = useRef("");
@@ -385,17 +456,16 @@ function TopicWorkspace({ api, topic, path, liveRevision, onBack, onChanged, onD
   draftRef.current = draft;
   dirtyRef.current = dirty;
   useEffect(() => {
-    let active = true;
-    api.get(`/topic-file${queryString({ topic, path })}`).then((value) => {
-      if (!active) return;
-      setFile(value); setDraft(value.content); setEditing(false); setDescription("");
-    }).catch((error) => active && setNotice({ kind: "error", text: errorMessage(error) }));
-    return () => { active = false; };
-  }, [api, topic, path, revision]);
-  useEffect(() => {
-    let active = true;
+    if (!active) return;
+    let mounted = true;
     api.get(`/topic-file${queryString({ topic, path })}`).then((current) => {
-      if (!active || !fileRef.current || current.hash === fileRef.current.hash) return;
+      if (!mounted) return;
+      const previous = fileRef.current;
+      if (!previous || previous.path !== current.path) {
+        setFile(current); setDraft(current.content); setEditing(false); setDescription("");
+        return;
+      }
+      if (current.hash === previous.hash) return;
       if (dirtyRef.current) {
         setConflict({ current, draft: draftRef.current, external: true });
       } else {
@@ -403,9 +473,9 @@ function TopicWorkspace({ api, topic, path, liveRevision, onBack, onChanged, onD
         setDraft(current.content);
         setNotice({ kind: "success", text: "Updated from a change made outside this browser." });
       }
-    }).catch((error) => active && setNotice({ kind: "error", text: errorMessage(error) }));
-    return () => { active = false; };
-  }, [api, topic, path, liveRevision]);
+    }).catch((error) => mounted && setNotice({ kind: "error", text: errorMessage(error) }));
+    return () => { mounted = false; };
+  }, [api, topic, path, revision, refreshRevision, active]);
   useEffect(() => { setNotice(null); }, [topic, path]);
   useEffect(() => { window.localStorage.setItem("topical.file-sort", fileSort); }, [fileSort]);
   useEffect(() => {
@@ -456,7 +526,7 @@ function TopicWorkspace({ api, topic, path, liveRevision, onBack, onChanged, onD
   return (
     <main className={`workspace ${showContext ? "" : "context-hidden"}`}>
       <section className="document-pane">
-        <PageHeader eyebrow={<button className="text-button" onClick={onBack}>← Topics</button>} title={metadata.title} subtitle={metadata.summary} actions={<><button onClick={() => setShowMetadata(true)}>Edit details</button><button className={editing ? "" : "primary"} onClick={() => setEditing((value) => !value)}>{editing ? "Read" : "Edit"}</button></>} />
+        <PageHeader eyebrow={<button className="text-button" onClick={onBack}>← Topics</button>} title={metadata.title} subtitle={metadata.summary} actions={<><button aria-haspopup="dialog" onClick={() => setShowAllFiles(true)}>Files</button><button aria-haspopup="dialog" onClick={() => setShowAllHistory(true)}>Change history</button><button onClick={() => setShowMetadata(true)}>Edit details</button><button className={editing ? "" : "primary"} onClick={() => setEditing((value) => !value)}>{editing ? "Read" : "Edit"}</button></>} />
         {notice && <div className={`notice ${notice.kind}`}>{notice.text}</div>}
         {editing ? (
           <div className="edit-layout">
@@ -467,22 +537,30 @@ function TopicWorkspace({ api, topic, path, liveRevision, onBack, onChanged, onD
         {editing && <div className="save-bar"><input aria-label="Change description" placeholder="Describe this change for the audit history" value={description} onChange={(event) => setDescription(event.target.value)} /><span>{dirty ? "Unsaved changes" : "No changes"}</span><button onClick={() => { setDraft(file.content); setEditing(false); }}>Cancel</button><button className="primary" disabled={!dirty} onClick={save}>Save safely</button></div>}
       </section>
       {showContext && <aside className="context-pane" aria-label="Topic sidebar">
-        <div className="context-heading"><span>Files</span><div className="context-actions"><button className="icon-button" aria-label="Inspect topic catalogue" title="Inspect topic catalogue" onClick={() => setShowCatalogue(true)}>{"{}"}</button><button className="icon-button" aria-label="Create supporting file" onClick={() => setShowNewFile(true)}>＋</button><button className="icon-button panel-toggle" aria-label="Hide topic sidebar" title="Hide topic sidebar" onClick={() => setShowContext(false)}>→</button></div></div>
-        <label className="file-sort">Sort supporting files<select aria-label="Sort topic files" value={fileSort} onChange={(event) => setFileSort(event.target.value as FileSort)}><option value="recent">Recently updated</option><option value="name">Name A–Z</option></select></label>
-        <div className="file-list">
-          {sortedFiles.map((item: any) => { const updated = fileUpdatedAtParts(item.updatedAt); return <button key={item.path} className={path === item.path ? "active" : ""} onClick={() => onOpenDocument(topic, item.path, metadata.title)}><span aria-hidden="true">◇</span><span className="file-label"><strong>{item.path}</strong><small><span>Updated {updated.date}</span>{" "}{updated.time && <span>at {updated.time}</span>}</small></span></button>; })}
+        <div className="context-heading"><span>Topic browser</span><div className="context-actions"><button className="icon-button" aria-label="Inspect topic catalogue" title="Inspect topic catalogue" onClick={() => setShowCatalogue(true)}>{"{}"}</button><button className="icon-button" aria-label="Create supporting file" onClick={() => setShowNewFile(true)}>＋</button><button className="icon-button" aria-expanded={!sidebarBrowserCollapsed} aria-controls={sidebarBrowser === "files" ? sidebarFilesId : sidebarHistoryId} aria-label={sidebarBrowserCollapsed ? "Expand topic browser" : "Collapse topic browser"} title={sidebarBrowserCollapsed ? "Expand topic browser" : "Collapse topic browser"} onClick={() => setSidebarBrowserCollapsed((value) => !value)}><span aria-hidden="true">{sidebarBrowserCollapsed ? "▸" : "▾"}</span></button><button className="icon-button panel-toggle" aria-label="Hide topic sidebar" title="Hide topic sidebar" onClick={() => setShowContext(false)}>→</button></div></div>
+        <div className="sidebar-browser-tabs" role="tablist" aria-label="Topic browser">
+          <button type="button" role="tab" id={`${sidebarFilesId}-tab`} aria-selected={sidebarBrowser === "files"} aria-controls={sidebarFilesId} tabIndex={sidebarBrowser === "files" ? 0 : -1} onKeyDown={(event) => { if (["ArrowLeft", "ArrowRight", "End"].includes(event.key)) { event.preventDefault(); setSidebarBrowser("history"); setSidebarBrowserCollapsed(false); window.requestAnimationFrame(() => document.getElementById(`${sidebarHistoryId}-tab`)?.focus()); } }} onClick={() => { setSidebarBrowser("files"); setSidebarBrowserCollapsed(false); }}>Files <small>{overview.data.filePage?.total ?? sortedFiles.length}</small></button>
+          <button type="button" role="tab" id={`${sidebarHistoryId}-tab`} aria-selected={sidebarBrowser === "history"} aria-controls={sidebarHistoryId} tabIndex={sidebarBrowser === "history" ? 0 : -1} onKeyDown={(event) => { if (["ArrowLeft", "ArrowRight", "Home"].includes(event.key)) { event.preventDefault(); setSidebarBrowser("files"); setSidebarBrowserCollapsed(false); window.requestAnimationFrame(() => document.getElementById(`${sidebarFilesId}-tab`)?.focus()); } }} onClick={() => { setSidebarBrowser("history"); setSidebarBrowserCollapsed(false); }}>Change history</button>
         </div>
+        {!sidebarBrowserCollapsed && sidebarBrowser === "files" && <section className="sidebar-browser-panel" role="tabpanel" id={sidebarFilesId} aria-labelledby={`${sidebarFilesId}-tab`}>
+          <label className="file-sort">Sort supporting files<select aria-label="Sort topic files" value={fileSort} onChange={(event) => setFileSort(event.target.value as FileSort)}><option value="recent">Recently updated</option><option value="name">Name A–Z</option><option value="size">Largest first</option></select></label>
+          <div className="file-list sidebar-browser-scroll" role="region" aria-label="Topic files" tabIndex={0}>
+            {sortedFiles.map((item: any) => { const updated = fileUpdatedAtParts(item.updatedAt); return <button key={item.path} aria-current={path === item.path ? "page" : undefined} className={path === item.path ? "active" : ""} onClick={() => onOpenDocument(topic, item.path, metadata.title)}><span aria-hidden="true">◇</span><span className="file-label"><strong>{item.path}</strong><small><span>Updated {updated.date}</span>{" "}{updated.time && <span>at {updated.time}</span>}</small></span></button>; })}
+          </div>
+          <button className="subtle show-all-button" aria-haspopup="dialog" onClick={() => setShowAllFiles(true)}>Show all {overview.data.filePage?.total ?? sortedFiles.length} files</button>
+        </section>}
+        {!sidebarBrowserCollapsed && sidebarBrowser === "history" && <section className="sidebar-browser-panel" role="tabpanel" id={sidebarHistoryId} aria-labelledby={`${sidebarHistoryId}-tab`}><TopicHistory api={api} topic={topic} revision={revision + refreshRevision} active={active} onOpenFile={onOpenDocument} onShowAll={() => setShowAllHistory(true)} /></section>}
         <div className="context-section"><span className="section-label">Tags</span><TagList tags={metadata.tags} onTagClick={onTagClick} /></div>
         <div className="context-section"><span className="section-label">File hash</span><code className="hash">{file.hash}</code></div>
-        <TopicHistory api={api} topic={topic} revision={revision + liveRevision} onOpenFile={onOpenDocument} />
-        {path !== "context.md" && <button className="danger subtle" onClick={() => setPendingDelete("file")}>Move file to trash</button>}
-        <button className="danger subtle" onClick={() => setPendingDelete("topic")}>Move topic to trash</button>
+        <div className="sidebar-danger-zone">{path !== "context.md" && <button className="danger subtle" onClick={() => setPendingDelete("file")}>Move file to trash</button>}<button className="danger subtle" onClick={() => setPendingDelete("topic")}>Move topic to trash</button></div>
       </aside>}
       {!showContext && <button className="show-context-button" aria-label="Show topic sidebar" title="Show topic sidebar" onClick={() => setShowContext(true)}><span aria-hidden="true">←</span><span>Topic details</span></button>}
       {conflict && <ConflictDialog conflict={conflict} onClose={() => setConflict(null)} onReload={() => { setFile(conflict.current); setDraft(conflict.current.content); setConflict(null); }} onReview={() => { setFile(conflict.current); setConflict(null); setNotice({ kind: "success", text: "Current version reviewed. Reconcile the draft, then save explicitly." }); }} />}
       {showMetadata && <MetadataDialog api={api} topic={topic} metadata={metadata} expectedHash={contextHash} onClose={() => setShowMetadata(false)} onSaved={() => { setShowMetadata(false); setRevision((value) => value + 1); onChanged(); }} />}
       {showNewFile && <NewFileDialog api={api} topic={topic} onClose={() => setShowNewFile(false)} onCreated={(createdPath: string) => { setShowNewFile(false); setRevision((value) => value + 1); onOpenDocument(topic, createdPath, metadata.title); onChanged(); }} />}
       {showCatalogue && <CatalogueInspector api={api} topic={topic} onClose={() => setShowCatalogue(false)} />}
+      {showAllFiles && <FileBrowserDialog api={api} topic={topic} title={metadata.title} initialSort={fileSort} currentPath={path} onOpen={onOpenDocument} onClose={() => setShowAllFiles(false)} />}
+      {showAllHistory && <HistoryBrowserDialog api={api} topic={topic} onOpenFile={onOpenDocument} onClose={() => setShowAllHistory(false)} />}
       {pendingDelete === "file" && <ReasonDialog title={`Move ${path} to trash?`} detail="The file remains recoverable in Topical trash." action="Move file to trash" onClose={() => setPendingDelete(undefined)} onSubmit={deleteFile} />}
       {pendingDelete === "topic" && <ReasonDialog title={`Move ${metadata.title} to trash?`} detail="The entire topic remains recoverable in Topical trash." action="Move topic to trash" onClose={() => setPendingDelete(undefined)} onSubmit={deleteTopic} />}
     </main>
@@ -530,13 +608,42 @@ function CreateTopic({ api, onClose, onCreated }: any) {
   return <Dialog title="Create topic" onClose={onClose}><form className="form-stack" onSubmit={submit}><label>Title<input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} required /></label><label>Summary<textarea value={summary} onChange={(event) => setSummary(event.target.value)} /></label><label>Tags<input placeholder="optional, sparse, recurring" value={tagText} onChange={(event) => setTagText(event.target.value)} /></label><label>Initial Markdown<textarea rows={8} value={content} onChange={(event) => setContent(event.target.value)} /></label><label>Change description<input value={description} onChange={(event) => setDescription(event.target.value)} required minLength={3} /></label>{error && <InlineError text={error} />}<div className="dialog-actions"><button type="button" onClick={onClose}>Cancel</button><button className="primary">Create topic</button></div></form></Dialog>;
 }
 
-function SearchView({ api, onOpen, onTagClick, request, liveRevision }: { api: ApiClient; onOpen(topic: string, path?: string, title?: string): void; onTagClick(tag: string): void; request: { query: string; key: number }; liveRevision: number }) {
+export function SearchView({ api, onOpen, onTagClick, request, liveRevision }: { api: ApiClient; onOpen(topic: string, path?: string, title?: string): void; onTagClick(tag: string): void; request: { query: string; key: number }; liveRevision: number }) {
   const [query, setQuery] = useState(request.query); const [submitted, setSubmitted] = useState(request.query); const [result, setResult] = useState<any>(); const [error, setError] = useState<string>();
+  const liveSearchMounted = useRef(false);
   const runSearch = async (next: string) => { if (!next.trim()) return; setSubmitted(next); setError(undefined); try { setResult(await api.get(`/search${queryString({ q: next, limit: 20 })}`)); } catch (reason) { setError(errorMessage(reason)); } };
   const search = async (event: FormEvent) => { event.preventDefault(); await runSearch(query); };
   useEffect(() => { if (request.query) { setQuery(request.query); void runSearch(request.query); } }, [request.key]);
-  useEffect(() => { if (submitted) void runSearch(submitted); }, [liveRevision]);
-  return <main className="surface"><PageHeader eyebrow="Retrieval" title="Search" subtitle="Topic-grouped, strict first, with every widening step visible." /><form className="search-bar" onSubmit={search}><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search titles, tags, headings, and Markdown…" /><button className="primary">Search</button></form>{error && <InlineError text={error} />}{result && <><div className="result-summary"><ModeBadge mode={result.matchMode} /><span>{result.topics.length} topic{result.topics.length === 1 ? "" : "s"}</span>{result.analysis?.ignoredTerms?.length ? <span>{result.analysis.ignoredTerms.length} ignored term(s)</span> : null}</div><div className="result-list">{result.topics.map((item: any) => <article className="result-card" key={item.topic}><button className="result-card-main" onClick={() => onOpen(item.topic, item.files?.[0]?.path || "context.md", item.title)} aria-label={`Open ${item.title}`}><strong>{item.title}</strong><p>{item.files?.[0]?.snippet || item.summary}</p><small>{(item.matchedFields || []).join(" · ")}{item.files?.[0]?.path ? ` · ${item.files[0].path}` : ""}</small></button><TagList tags={item.tags} onTagClick={onTagClick} /></article>)}</div>{!result.topics.length && <EmptyState title={`No results for “${submitted}”`} detail="Topical exhausted exact and approved bounded fallback modes." />}</>}</main>;
+  useEffect(() => { if (!liveSearchMounted.current) { liveSearchMounted.current = true; return; } if (submitted) void runSearch(submitted); }, [liveRevision]);
+  return <main className="surface"><PageHeader eyebrow="Retrieval" title="Search" subtitle="Topic-grouped results with every matching file available as an exact destination." /><form className="search-bar" onSubmit={search}><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search titles, tags, headings, and Markdown…" /><button className="primary">Search</button></form>{error && <InlineError text={error} />}{result && <><div className="result-summary"><ModeBadge mode={result.matchMode} /><span>{result.topics.length} topic{result.topics.length === 1 ? "" : "s"}</span>{result.analysis?.ignoredTerms?.length ? <span>{result.analysis.ignoredTerms.length} ignored term(s)</span> : null}</div><div className="result-list">{result.topics.map((item: any) => <SearchTopicResult key={`${submitted}:${item.topic}`} api={api} query={submitted} matchMode={result.matchMode} item={item} onOpen={onOpen} onTagClick={onTagClick} />)}</div>{!result.topics.length && <EmptyState title={`No results for “${submitted}”`} detail="Topical exhausted exact and approved bounded fallback modes." />}</>}</main>;
+}
+
+function SearchTopicResult({ api, query, matchMode, item, onOpen, onTagClick }: { api: ApiClient; query: string; matchMode: string; item: any; onOpen(topic: string, path?: string, title?: string): void; onTagClick(tag: string): void }) {
+  const [expanded, setExpanded] = useState(false);
+  const [files, setFiles] = useState<any[]>(item.files || []);
+  const [page, setPage] = useState<any>({ total: item.fileMatchCount || 0, nextCursor: null });
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string>();
+  const loadAll = async (cursor?: string) => {
+    setLoading(true); setError(undefined);
+    try {
+      const next = await api.get<any>(`/search/files${queryString({ q: query, topic: item.topic, matchMode, limit: 50, cursor })}`);
+      setFiles((current) => cursor ? [...current, ...next.files.filter((file: any) => !current.some((existing) => existing.path === file.path))] : next.files);
+      setPage(next.page); setExpanded(true);
+    } catch (reason) { setError(errorMessage(reason)); }
+    finally { setLoading(false); }
+  };
+  const visibleFiles = expanded ? files : files.slice(0, 3);
+  const matchCount = Math.max(Number(item.fileMatchCount || 0), visibleFiles.length);
+  const metadataOnly = Number(item.fileMatchCount || 0) === 0;
+  return <article className="result-card">
+    <div className="result-topic-heading"><button className="result-title" aria-label={`Open ${item.title}`} onClick={() => onOpen(item.topic, item.files?.[0]?.path || "context.md", item.title)}><strong>{item.title}</strong><span aria-hidden="true">→</span></button><TagList tags={item.tags} onTagClick={onTagClick} /></div>
+    <p className="result-summary-text">{item.files?.[0]?.snippet || item.summary}</p>
+    <small className="result-fields">{(item.matchedFields || []).join(" · ") || "Topic metadata"}</small>
+    {visibleFiles.length > 0 && <div className="search-file-list" aria-label={`Matching files in ${item.title}`}>{visibleFiles.map((file: any) => <button key={file.path} onClick={() => onOpen(item.topic, file.path, item.title)}><span><strong>{file.path}</strong><small>{metadataOnly ? "Topic metadata match · opens the topic map" : ((file.matchedFields || []).join(" · ") || (file.matchedTerms || []).join(" · ") || "Markdown match")}</small></span><p>{file.snippet || (metadataOnly ? item.summary : "")}</p><span aria-hidden="true">Open →</span></button>)}</div>}
+    {error && <InlineError text={error} />}
+    <div className="result-card-actions">{!expanded && matchCount > visibleFiles.length && <button className="subtle" disabled={loading} onClick={() => void loadAll()}>{loading ? "Loading…" : `Show all ${matchCount} matching files`}</button>}{expanded && page?.nextCursor && <button className="subtle" disabled={loading} onClick={() => void loadAll(page.nextCursor)}>{loading ? "Loading…" : "Load more matching files"}</button>}{expanded && <button className="text-button" onClick={() => { setExpanded(false); setFiles(item.files || []); }}>Show fewer</button>}</div>
+  </article>;
 }
 
 export function TagsView({ api, liveRevision = 0, onTagClick }: { api: ApiClient; liveRevision?: number; onTagClick?(tag: string): void }) {
@@ -555,8 +662,25 @@ export function currentHistoryPath(event: any) {
 }
 
 function HistoryView({ api, liveRevision, onOpenFile }: { api: ApiClient; liveRevision: number; onOpenFile(topic: string, path?: string): void }) {
-  const data = useLoad<any>(() => api.get("/history?limit=100"), [api, liveRevision]);
-  return <main className="surface"><PageHeader eyebrow="Audit" title="History" subtitle="Recorded mutations. Available entries open the current file; historical line diffs are not available." />{data.loading && <Loading />}{data.error && <InlineError text={data.error} />}<div className="timeline">{(data.data?.events || []).map((event: any, index: number) => { const target = currentHistoryPath(event); return <div className="timeline-item" key={`${event.at}-${index}`}><span /><div>{target ? <button className="history-link" onClick={() => onOpenFile(event.topic, target)} title="Open the current file"><strong>{event.description}</strong><p>{event.topic} / {target} · {event.action}</p><small>{formatEnglishDate(event.at, { includeTime: true })}</small></button> : <><strong>{event.description}</strong><p>{event.topic}{event.path ? ` / ${event.path}` : ""} · {event.action}</p><small>{formatEnglishDate(event.at, { includeTime: true })} · current file unavailable</small></>}</div></div>; })}</div></main>;
+  const [events, setEvents] = useState<any[]>([]);
+  const [page, setPage] = useState<any>();
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string>();
+  const load = async (cursor?: string) => {
+    setLoading(true); setError(undefined);
+    try {
+      const next = await api.get<any>(`/history${queryString({ limit: 50, cursor })}`);
+      setEvents((current) => cursor ? [...current, ...next.events] : next.events);
+      setPage(next.page);
+    } catch (reason) { setError(errorMessage(reason)); }
+    finally { setLoading(false); }
+  };
+  useEffect(() => { void load(); }, [api, liveRevision]);
+  return <main className="surface"><PageHeader eyebrow="Audit" title="History" subtitle="Recorded mutation metadata. Available entries open the current file; historical Markdown and line diffs are not stored." />{loading && !events.length && <Loading />}{error && <InlineError text={error} />}<HistoryTimeline events={events} onOpenFile={onOpenFile} />{page?.nextCursor && <button disabled={loading} onClick={() => void load(page.nextCursor)}>{loading ? "Loading…" : `Load more (${events.length} of ${page.total})`}</button>}</main>;
+}
+
+function HistoryTimeline({ events, onOpenFile }: { events: any[]; onOpenFile(topic: string, path?: string): void }) {
+  return <div className="timeline">{events.map((event: any, index: number) => { const target = currentHistoryPath(event); return <div className="timeline-item" key={event.id || `${event.at}-${index}`}><span /><div>{target ? <button className="history-link" onClick={() => onOpenFile(event.topic, target)} title="Open the current file"><strong>{event.description}</strong><p>{event.topic} / {target} · {event.action.replaceAll("_", " ")}</p><small>{formatEnglishDate(event.at, { includeTime: true })}</small></button> : <><strong>{event.description}</strong><p>{event.topic}{event.path ? ` / ${event.path}` : ""} · {event.action.replaceAll("_", " ")}</p><small>{formatEnglishDate(event.at, { includeTime: true })} · current file unavailable</small></>}</div></div>; })}</div>;
 }
 
 function TrashView({ api, liveRevision }: { api: ApiClient; liveRevision: number }) {
@@ -593,10 +717,92 @@ function CreatePublication({ api, topics, onClose, onCreated }: any) {
   return <Dialog title="Create publication checkpoint" onClose={onClose}><form className="form-stack" onSubmit={submit}><label>Topic<select value={topic} onChange={(event) => setTopic(event.target.value)}>{topics.map((item: any) => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label><div className="field-row"><label>Destination alias<input value={alias} onChange={(event) => setAlias(event.target.value)} required /></label><label>Markdown path<input value={path} onChange={(event) => setPath(event.target.value)} required /></label></div><label>Label<input value={label} onChange={(event) => setLabel(event.target.value)} /></label><label>Complete standalone Markdown<textarea rows={12} value={content} onChange={(event) => setContent(event.target.value)} required /></label><label>Change description<input value={description} onChange={(event) => setDescription(event.target.value)} required minLength={3} /></label>{error && <InlineError text={error} />}<div className="dialog-actions"><button type="button" onClick={onClose}>Cancel</button><button className="primary">Publish checkpoint</button></div></form></Dialog>;
 }
 
-function TopicHistory({ api, topic, revision, onOpenFile }: { api: ApiClient; topic: string; revision: number; onOpenFile(topic: string, path?: string): void }) {
-  const [limit, setLimit] = useState(8);
-  const data = useLoad<any>(() => api.get(`/history${queryString({ topic, limit })}`), [api, topic, limit, revision]);
-  return <div className="context-section topic-history"><span className="section-label">Topic history</span>{data.loading && !data.data && <Loading />}{data.error && <InlineError text={data.error} />}{(data.data?.events || []).map((event: any, index: number) => { const target = currentHistoryPath(event); return target ? <button className="mini-history history-link" title="Open the current file" key={`${event.at}-${event.action}-${index}`} onClick={() => onOpenFile(topic, target)}><strong>{event.description}</strong><small>{event.action.replaceAll("_", " ")} · {target}<br />{formatEnglishDate(event.at, { includeTime: true })}</small></button> : <div className="mini-history" key={`${event.at}-${event.action}-${index}`}><strong>{event.description}</strong><small>{event.action.replaceAll("_", " ")}{event.path ? ` · ${event.path}` : ""}<br />{formatEnglishDate(event.at, { includeTime: true })} · unavailable</small></div>; })}{data.data?.page?.nextCursor && <button className="subtle" onClick={() => setLimit((value) => Math.min(100, value + 12))}>Load more</button>}</div>;
+function TopicHistory({ api, topic, revision, active, onOpenFile, onShowAll }: { api: ApiClient; topic: string; revision: number; active: boolean; onOpenFile(topic: string, path?: string): void; onShowAll(): void }) {
+  const data = useLoad<any>(active ? () => api.get(`/history${queryString({ topic, limit: 8 })}`) : null, [api, topic, revision, active]);
+  return <div className="topic-history">{data.loading && !data.data && <Loading />}{data.error && <InlineError text={data.error} />}<div className="sidebar-browser-scroll" role="region" aria-label="Recent topic changes" tabIndex={0}>{(data.data?.events || []).map((event: any, index: number) => { const target = currentHistoryPath(event); return target ? <button className="mini-history history-link" title="Open the current file" key={event.id || `${event.at}-${event.action}-${index}`} onClick={() => onOpenFile(topic, target)}><strong>{event.description}</strong><small>{event.action.replaceAll("_", " ")} · {target}<br />{formatEnglishDate(event.at, { includeTime: true })}</small></button> : <div className="mini-history" key={event.id || `${event.at}-${event.action}-${index}`}><strong>{event.description}</strong><small>{event.action.replaceAll("_", " ")}{event.path ? ` · ${event.path}` : ""}<br />{formatEnglishDate(event.at, { includeTime: true })} · unavailable</small></div>; })}</div><button className="subtle show-all-button" aria-haspopup="dialog" onClick={onShowAll}>Show all history{data.data?.page?.total ? ` (${data.data.page.total})` : ""}</button></div>;
+}
+
+function FileBrowserDialog({ api, topic, title, initialSort, currentPath, onOpen, onClose }: { api: ApiClient; topic: string; title: string; initialSort: FileSort; currentPath: string; onOpen(topic: string, path?: string, title?: string): void; onClose(): void }) {
+  const resultsId = useId();
+  const [query, setQuery] = useState("");
+  const [sort, setSort] = useState<FileSort>(initialSort);
+  const [mode, setMode] = useState<"tree" | "list">("tree");
+  const [collapsedFolders, setCollapsedFolders] = useState<string[]>([]);
+  const [files, setFiles] = useState<any[]>([]);
+  const [page, setPage] = useState<any>();
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string>();
+  useEffect(() => {
+    let active = true;
+    const timer = window.setTimeout(async () => {
+      setLoading(true); setError(undefined);
+      try {
+        const next = await api.get<any>(`/topic-files${queryString({ topic, query, sort, limit: 50 })}`);
+        if (active) { setFiles(next.files); setPage(next.page); }
+      } catch (reason) { if (active) setError(errorMessage(reason)); }
+      finally { if (active) setLoading(false); }
+    }, 140);
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [api, topic, query, sort]);
+  const loadMore = async () => {
+    if (!page?.nextCursor) return;
+    setLoading(true); setError(undefined);
+    try {
+      const next = await api.get<any>(`/topic-files${queryString({ topic, query, sort, limit: 50, cursor: page.nextCursor })}`);
+      setFiles((current) => [...current, ...next.files]); setPage(next.page);
+    } catch (reason) { setError(errorMessage(reason)); }
+    finally { setLoading(false); }
+  };
+  const groups = files.reduce((result: Map<string, any[]>, file: any) => {
+    const separator = file.path.lastIndexOf("/");
+    const folder = separator < 0 ? "Topic root" : file.path.slice(0, separator);
+    result.set(folder, [...(result.get(folder) || []), file]);
+    return result;
+  }, new Map<string, any[]>());
+  const open = (filePath: string) => { onOpen(topic, filePath, title); onClose(); };
+  return <Dialog title={`All files in ${title}`} onClose={onClose} wide>
+    <p className="dialog-intro">Browse the complete topic map in bounded pages. <strong>context.md</strong> is the concise routing document.</p>
+    <div className="browser-toolbar"><label>Filter files<input autoFocus aria-controls={resultsId} placeholder="Path, heading, or excerpt" value={query} onChange={(event) => setQuery(event.target.value)} /></label><label>Sort<select aria-controls={resultsId} value={sort} onChange={(event) => setSort(event.target.value as FileSort)}><option value="recent">Recently updated</option><option value="name">Name A–Z</option><option value="size">Largest first</option></select></label><div className="view-toggle" role="group" aria-label="File browser view"><button aria-pressed={mode === "tree"} className={mode === "tree" ? "active" : ""} onClick={() => setMode("tree")}>Folders</button><button aria-pressed={mode === "list"} className={mode === "list" ? "active" : ""} onClick={() => setMode("list")}>List</button></div></div>
+    {error && <InlineError text={error} />}
+    {loading && !files.length && <Loading />}
+    {!loading && !files.length && <EmptyState title="No matching files" detail="Try a different path, heading, or excerpt." />}
+    <div id={resultsId} className="browser-results" role="region" aria-label="Topic file results" tabIndex={0}>{mode === "tree" ? <div className="file-tree">{[...groups.entries()].map(([folder, items]) => { const collapsed = collapsedFolders.includes(folder); return <section key={folder}><button className="folder-heading" aria-expanded={!collapsed} onClick={() => setCollapsedFolders((current) => current.includes(folder) ? current.filter((item) => item !== folder) : [...current, folder])}><span aria-hidden="true">{collapsed ? "▸" : "▾"}</span><strong>{folder}</strong><small>{items.length}</small></button>{!collapsed && <div>{items.map((file) => <FileBrowserRow key={file.path} file={file} active={file.path === currentPath} onOpen={() => open(file.path)} />)}</div>}</section>; })}</div> : <div className="browser-list">{files.map((file) => <FileBrowserRow key={file.path} file={file} active={file.path === currentPath} onOpen={() => open(file.path)} />)}</div>}</div>
+    <div className="browser-footer"><span role="status" aria-live="polite">{files.length}{page?.total ? ` of ${page.total}` : ""} file{page?.total === 1 ? "" : "s"}</span>{page?.nextCursor && <button disabled={loading} onClick={() => void loadMore()}>{loading ? "Loading…" : "Load more"}</button>}</div>
+  </Dialog>;
+}
+
+function FileBrowserRow({ file, active, onOpen }: { file: any; active: boolean; onOpen(): void }) {
+  const updated = fileUpdatedAtParts(file.updatedAt);
+  return <button className={`browser-file-row ${active ? "active" : ""}`} aria-current={active ? "page" : undefined} onClick={onOpen}><span className="file-kind" aria-hidden="true">{file.path === "context.md" ? "◆" : "◇"}</span><span className="browser-file-main"><strong>{file.path}</strong><small>{file.path === "context.md" ? "Topic map · " : ""}{Number(file.size || 0).toLocaleString()} bytes · {updated.date}{updated.time ? ` at ${updated.time}` : ""}</small>{file.headings?.length ? <span>{file.headings.slice(0, 3).join(" · ")}</span> : file.excerpt ? <span>{file.excerpt}</span> : null}</span><span aria-hidden="true">Open →</span></button>;
+}
+
+function HistoryBrowserDialog({ api, topic, onOpenFile, onClose }: { api: ApiClient; topic: string; onOpenFile(topic: string, path?: string): void; onClose(): void }) {
+  const resultsId = useId();
+  const [action, setAction] = useState("");
+  const [pathQuery, setPathQuery] = useState("");
+  const [events, setEvents] = useState<any[]>([]);
+  const [page, setPage] = useState<any>();
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string>();
+  const load = async (cursor?: string) => {
+    setLoading(true); setError(undefined);
+    try {
+      const next = await api.get<any>(`/history${queryString({ topic, action, pathQuery, limit: 50, cursor })}`);
+      setEvents((current) => cursor ? [...current, ...next.events] : next.events); setPage(next.page);
+    } catch (reason) { setError(errorMessage(reason)); }
+    finally { setLoading(false); }
+  };
+  useEffect(() => {
+    const timer = window.setTimeout(() => void load(), 140);
+    return () => window.clearTimeout(timer);
+  }, [api, topic, action, pathQuery]);
+  const open = (eventTopic: string, filePath?: string) => { onOpenFile(eventTopic, filePath); onClose(); };
+  return <Dialog title={`History for ${topic}`} onClose={onClose} wide>
+    <p className="dialog-intro">This is durable audit metadata, not stored historical Markdown. Rows open the file’s current content when it is still available.</p>
+    <div className="browser-toolbar history-filters"><label>Action<select aria-controls={resultsId} value={action} onChange={(event) => setAction(event.target.value)}><option value="">All actions</option><option value="create_topic">Create topic</option><option value="create_file">Create file</option><option value="update_file">Update file</option><option value="update_metadata">Update metadata</option><option value="delete_file">Delete file</option><option value="delete_topic">Delete topic</option><option value="restore_file">Restore file</option><option value="restore_topic">Restore topic</option></select></label><label>File path<input aria-controls={resultsId} placeholder="Filter by path" value={pathQuery} onChange={(event) => setPathQuery(event.target.value)} /></label></div>
+    {error && <InlineError text={error} />}{loading && !events.length && <Loading />}{!loading && !events.length && <EmptyState title="No matching history" detail="Try clearing one of the filters." />}<div id={resultsId} className="browser-results" role="region" aria-label="Topic change history results" tabIndex={0}><HistoryTimeline events={events} onOpenFile={open} /></div>
+    <div className="browser-footer"><span role="status" aria-live="polite">{events.length}{page?.total ? ` of ${page.total}` : ""} event{page?.total === 1 ? "" : "s"}</span>{page?.nextCursor && <button disabled={loading} onClick={() => void load(page.nextCursor)}>{loading ? "Loading…" : "Load more"}</button>}</div>
+  </Dialog>;
 }
 
 function CatalogueInspector({ api, topic, onClose }: { api: ApiClient; topic?: string; onClose(): void }) {
@@ -616,7 +822,7 @@ function CatalogueInspector({ api, topic, onClose }: { api: ApiClient; topic?: s
 
 function RenderedCatalogue({ value, topic }: { value: any; topic?: string }) {
   const documents = value.documents || [];
-  const history = value.history || value.recentActions || [];
+  const history = value.history || value.recentHistory || value.recentActions || [];
   return <div className="rendered-catalogue"><div className="health-grid"><div className="health-card"><small>Schema version</small><strong>{value.version ?? "Unknown"}</strong></div><div className="health-card"><small>{topic ? "Files" : "Topics"}</small><strong>{topic ? (value.files?.length || documents.length) : (value.topics?.length || 0)}</strong></div><div className="health-card"><small>Documents</small><strong>{documents.length}</strong></div><div className="health-card"><small>Actions</small><strong>{history.length}</strong></div></div>{value.topic && <section><h3>Topic metadata</h3><pre>{JSON.stringify(value.topic, null, 2)}</pre></section>}{value.topics?.length ? <CatalogueRows title="Topics" rows={value.topics} /> : null}{documents.length ? <CatalogueRows title="Documents" rows={documents} /> : null}{history.length ? <CatalogueRows title={value.history ? "History" : "Recent actions"} rows={history} /> : null}</div>;
 }
 
@@ -640,8 +846,28 @@ function ReasonDialog({ title, detail, action, onClose, onSubmit }: { title: str
   return <Dialog title={title} onClose={onClose}><p>{detail}</p><form className="form-stack" onSubmit={submit}><label>Reason<input autoFocus value={description} onChange={(event) => setDescription(event.target.value)} required minLength={3} /></label>{error && <InlineError text={error} />}<div className="dialog-actions"><button type="button" onClick={onClose}>Cancel</button><button className="primary danger-action" disabled={submitting || description.trim().length < 3}>{submitting ? "Working…" : action}</button></div></form></Dialog>;
 }
 
-function Dialog({ title, children, onClose }: { title: string; children: ReactNode; onClose(): void }) {
-  return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}><section className="dialog" role="dialog" aria-modal="true" aria-label={title}><header><h2>{title}</h2><button className="icon-button" aria-label="Close" onClick={onClose}>×</button></header>{children}</section></div>;
+function Dialog({ title, children, onClose, wide = false }: { title: string; children: ReactNode; onClose(): void; wide?: boolean }) {
+  const titleId = useId();
+  const closeButton = useRef<HTMLButtonElement>(null);
+  const dialog = useRef<HTMLElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  useEffect(() => {
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
+    const keyboard = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { onCloseRef.current(); return; }
+      if (event.key !== "Tab" || !dialog.current) return;
+      const focusable = [...dialog.current.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), [href], [tabindex]:not([tabindex="-1"])')];
+      if (!focusable.length) return;
+      const first = focusable[0]; const last = focusable.at(-1)!;
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    };
+    document.addEventListener("keydown", keyboard);
+    closeButton.current?.focus({ preventScroll: true });
+    return () => { document.removeEventListener("keydown", keyboard); previous?.focus(); };
+  }, []);
+  return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}><section ref={dialog} className={`dialog ${wide ? "dialog-wide" : ""}`} role="dialog" aria-modal="true" aria-labelledby={titleId}><header><h2 id={titleId}>{title}</h2><button ref={closeButton} className="icon-button" aria-label="Close" onClick={onClose}>×</button></header>{children}</section></div>;
 }
 
 function ModeBadge({ mode }: { mode: string }) { return <span className={`mode mode-${String(mode).replaceAll("_", "-")}`}>{String(mode).replaceAll("_", " ")}</span>; }

@@ -7,4 +7,5 @@ ui-dist/
 playwright-report/
 test-results/
 .topical-cache/
+.topical-history/
 npm-debug.log*

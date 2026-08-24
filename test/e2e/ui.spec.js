@@ -30,6 +30,12 @@ test("browse, search, edit, and audit through the loopback UI", async ({ page })
     });
     if (!response.ok) throw new Error(`External fixture failed: ${response.status}`);
   }, bootstrap.csrfToken);
+  const initialUpdates = page.getByRole("button", { name: /Updates available/ });
+  await expect(initialUpdates).toBeVisible({ timeout: 5_000 });
+  await expect(page.getByRole("button", { name: /External Browser Topic/ })).toHaveCount(0);
+  await initialUpdates.hover();
+  await expect(page.getByText("External Browser Topic", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Refresh without moving" }).evaluate((button) => button.click());
   await expect(page.getByRole("button", { name: /External Browser Topic/ })).toBeVisible({ timeout: 5_000 });
 
   await page.getByRole("button", { name: "Open Browser Fixture" }).click();
@@ -62,8 +68,14 @@ test("browse, search, edit, and audit through the loopback UI", async ({ page })
   await expect(page.getByRole("article").getByText("Saved through Playwright.", { exact: true })).toBeVisible();
   await expect(page.getByText(/Saved with conflict protection/)).toBeVisible();
 
-  await expect(page.getByText("Topic history")).toBeVisible();
+  await page.getByRole("tab", { name: "Change history" }).click();
   await expect(page.getByText("Saved through the browser test.")).toBeVisible();
+  await page.getByRole("button", { name: /Show all history/ }).click();
+  const historyDialog = page.getByRole("dialog", { name: "History for browser-fixture" });
+  await expect(historyDialog.getByText("Saved through the browser test.")).toBeVisible();
+  await expect(historyDialog.getByText(/durable audit metadata/i)).toBeVisible();
+  await historyDialog.getByRole("button", { name: "Close" }).click();
+  await page.getByRole("tab", { name: /Files/ }).click();
 
   await page.getByRole("button", { name: "Edit", exact: true }).click();
   await editor.press("ControlOrMeta+End");
@@ -76,6 +88,16 @@ test("browse, search, edit, and audit through the loopback UI", async ({ page })
     });
     if (!response.ok) throw new Error(`External file fixture failed: ${response.status}`);
   }, bootstrap.csrfToken);
+  const updates = page.getByRole("button", { name: /Updates available/ });
+  await expect(updates).toBeVisible({ timeout: 5_000 });
+  await updates.hover();
+  await expect(page.getByText("Browser Fixture", { exact: true }).last()).toBeVisible();
+  const scrollBeforeRefresh = await page.evaluate(() => {
+    window.scrollTo(0, Math.min(220, document.documentElement.scrollHeight - window.innerHeight));
+    return window.scrollY;
+  });
+  await page.getByRole("button", { name: "Refresh without moving" }).evaluate((button) => button.click());
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(scrollBeforeRefresh);
   await expect(page.getByRole("dialog", { name: "This file changed elsewhere" })).toBeVisible({ timeout: 5_000 });
   await expect(page.getByRole("dialog").getByText("Unsaved browser draft.", { exact: false })).toBeVisible();
   await page.getByRole("button", { name: "Keep draft after review" }).click();
@@ -106,6 +128,17 @@ test("browse, search, edit, and audit through the loopback UI", async ({ page })
   await browserGroupLabel.click();
   await expect(browserGroup.getByRole("tab")).toHaveCount(2);
   await activeWorkspace.getByLabel("Sort topic files").selectOption("name");
+  await activeWorkspace.getByRole("button", { name: "Show all 2 files" }).click();
+  const fileBrowser = page.getByRole("dialog", { name: "All files in Browser Fixture" });
+  await expect(fileBrowser.getByText("observations.md", { exact: true })).toBeVisible();
+  const rootFolder = fileBrowser.getByRole("button", { name: /Topic root/ });
+  await expect(rootFolder).toHaveAttribute("aria-expanded", "true");
+  await rootFolder.click();
+  await expect(rootFolder).toHaveAttribute("aria-expanded", "false");
+  await fileBrowser.getByRole("button", { name: "List" }).click();
+  await expect(fileBrowser.getByText("observations.md", { exact: true })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(fileBrowser).toHaveCount(0);
 
   await activeWorkspace.getByRole("button", { name: "Inspect topic catalogue" }).click();
   await expect(page.getByRole("dialog", { name: "browser-fixture topic catalogue" })).toBeVisible();

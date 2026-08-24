@@ -7,6 +7,7 @@ import { z } from "zod";
 import { TopicalApplication } from "./application.js";
 import { loadTopicalConfig } from "./config.js";
 import { TopicalError } from "./errors.js";
+import { TOPICAL_VERSION } from "./version.js";
 
 function textResult(value, isError = false) {
   return { isError, content: [{ type: "text", text: JSON.stringify(value, null, 2) }] };
@@ -49,16 +50,18 @@ const SERVER_INSTRUCTIONS = [
   "When a user mentions topical, existing notes, or prior working context, inspect Topical tools before using the terminal or asking for a path.",
   "Use search_topics or list_topics before creating or writing when the topic is uncertain.",
   "Do not infer a topic from a similarly named Codex project; ask only if search and list cannot identify a single likely topic.",
+  "Treat context.md as a concise routing document: purpose, current status, immediate decisions, and links to focused supporting files.",
+  "Put substantial plans, research, logs, and handoffs in focused topic files; update context.md with only a concise status or link.",
   "Publication guidance is read-only; only explicit publish_document or update_publication calls can change a published file."
 ].join(" ");
 const description = z.string().min(3).max(500).describe("One sentence explaining this change; recorded in the topic history.");
 
 export async function startServer({ application, transport } = {}) {
   const nodeMajor = Number(process.versions.node.split(".")[0]);
-  if (nodeMajor !== 24) throw new Error(`Topical v0.5 requires Node.js 24 LTS; found ${process.version}.`);
+  if (nodeMajor !== 24) throw new Error(`Topical v${TOPICAL_VERSION} requires Node.js 24 LTS; found ${process.version}.`);
   const app = application || new TopicalApplication(await loadTopicalConfig());
   await app.initialize();
-  const server = new McpServer({ name: "topical", version: "0.5.0" }, { instructions: SERVER_INSTRUCTIONS });
+  const server = new McpServer({ name: "topical", version: TOPICAL_VERSION }, { instructions: SERVER_INSTRUCTIONS });
 
   server.registerTool("search_topics", {
     title: "Search topics",
@@ -67,12 +70,38 @@ export async function startServer({ application, transport } = {}) {
     annotations: { readOnlyHint: true }
   }, tool((input) => app.searchTopics(input)));
 
+  server.registerTool("search_topic_files", {
+    title: "Search files in a topic",
+    description: "Page through every file matched by an existing topic-grouped search without expanding the initial search response unboundedly.",
+    inputSchema: {
+      query: z.string().default(""),
+      topic: topicId,
+      matchMode: z.enum(["strict", "relaxed", "expanded"]).optional(),
+      cursor,
+      limit: z.number().int().min(1).max(100).optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, tool((input) => app.searchTopicFiles(input)));
+
   server.registerTool("list_topics", {
     title: "List topics",
     description: "List a bounded page of known Topical note folders. Use when a user refers to existing notes and the explicit topic is unclear.",
     inputSchema: { sort: z.enum(["recent", "title", "created"]).optional(), tags: optionalTags, cursor, limit: z.number().int().min(1).max(100).optional() },
     annotations: { readOnlyHint: true }
   }, tool((input) => app.listTopics(input)));
+
+  server.registerTool("list_topic_files", {
+    title: "List topic files",
+    description: "Return one bounded page of file descriptors for an explicitly selected topic. Use cursors instead of requesting an unbounded topic catalogue.",
+    inputSchema: {
+      topic: topicId,
+      query: z.string().max(2000).optional(),
+      sort: z.enum(["recent", "name", "size"]).optional(),
+      cursor,
+      limit: z.number().int().min(1).max(100).optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, tool((input) => app.listTopicFiles(input)));
 
   server.registerTool("list_tags", {
     title: "List tags",
@@ -84,7 +113,7 @@ export async function startServer({ application, transport } = {}) {
   server.registerTool("list_history", {
     title: "List history",
     description: "Return a bounded, newest-first audit history page globally or for one explicit topic.",
-    inputSchema: { topic: optionalTopicId, cursor, limit: z.number().int().min(1).max(100).optional() },
+    inputSchema: { topic: optionalTopicId, action: z.string().max(100).optional(), pathQuery: z.string().max(2000).optional(), cursor, limit: z.number().int().min(1).max(100).optional() },
     annotations: { readOnlyHint: true }
   }, tool((input) => app.listHistory(input)));
 
@@ -117,13 +146,27 @@ export async function startServer({ application, transport } = {}) {
   server.registerTool("get_topic_overview", {
     title: "Get topic overview",
     description: "Return a bounded briefing for an explicitly selected Topical topic. Use after search or list to choose focused files to read.",
-    inputSchema: { topic: topicId, maxChars: z.number().int().min(500).max(12000).optional() },
+    inputSchema: {
+      topic: topicId,
+      include: z.array(z.enum(["context", "files", "history", "publications"])).max(4).optional(),
+      maxChars: z.number().int().min(500).max(12000).optional(),
+      fileCursor: cursor,
+      fileLimit: z.number().int().min(1).max(100).optional(),
+      fileSort: z.enum(["recent", "name", "size"]).optional()
+    },
     annotations: { readOnlyHint: true }
   }, tool((input) => app.getTopicOverview(input)));
 
+  server.registerTool("analyze_topic_context", {
+    title: "Analyze topic context",
+    description: "Analyze context.md size, structure, and local links against the advisory thin-context contract. This is read-only and never reorganizes or deletes content.",
+    inputSchema: { topic: topicId },
+    annotations: { readOnlyHint: true }
+  }, tool((input) => app.analyzeTopicContext(input)));
+
   server.registerTool("update_topic_file", {
     title: "Update topic file",
-    description: "Append, replace, or replace a named Markdown section in the explicit topic. Read first; the reviewed expectedHash is required for conflict safety.",
+    description: "Append, replace, or replace a named Markdown section in the explicit topic. Read first and use expectedHash. Keep context.md concise; substantial plans, research, logs, and handoffs belong in focused supporting files with a short context.md link.",
     inputSchema: {
       topic: topicId,
       filePath: optionalTopicFilePath,
@@ -137,7 +180,7 @@ export async function startServer({ application, transport } = {}) {
 
   server.registerTool("create_topic_file", {
     title: "Create topic file",
-    description: "Create a supporting Markdown file inside the explicitly selected existing Topical topic.",
+    description: "Create a focused supporting Markdown file inside the explicitly selected topic for substantial plans, research, logs, or handoffs that should not make context.md a context dump.",
     inputSchema: { topic: topicId, filePath: topicFilePath, content: z.string().optional(), description }
   }, tool((input) => app.createTopicFile(input)));
 

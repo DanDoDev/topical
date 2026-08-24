@@ -3,13 +3,15 @@
 [![CI](https://github.com/DanDoDev/topical/actions/workflows/ci.yml/badge.svg)](https://github.com/DanDoDev/topical/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Topical is a local-first, Markdown-based context store for agents and people. Every topic is a folder whose `context.md` is the source of truth. `index.json` files are maintained catalogue metadata and audit logs that can be rebuilt after manual edits.
+Topical is a local-first, Markdown-based context store for agents and people. Every topic is a folder whose `context.md` is the primary routing document. `index.json` files hold rebuildable catalogue metadata and only a small recent-audit ring; complete audit metadata is stored durably and separately under `$TOPICAL_ROOT/.topical-history`.
 
-Search uses a disposable SQLite FTS5 cache at `$TOPICAL_ROOT/.topical-cache/search.sqlite`. The server rebuilds it from Markdown when it is missing, corrupt, or incompatible, then transactionally replaces only the affected topic after each mutation. Normal list, read, overview, and search calls do not rewrite JSON indexes or the search cache.
+Search uses a disposable SQLite FTS5 cache at `$TOPICAL_ROOT/.topical-cache/search.sqlite`. The server rebuilds it from Markdown when it is missing, corrupt, or incompatible, then incrementally updates the changed document and required topic aggregate after a normal mutation. Normal list, read, overview, history, and search calls do not rewrite JSON indexes or the search cache.
 
 Topical is currently pre-1.0. Back up important topic folders before upgrading across versions while the storage and tool contracts are still evolving.
 
-Topical also includes a localhost-only management UI for browsing, grouped search, Markdown editing and preview, taxonomy guidance, audit history, recoverable trash, publication checkpoints, and index health. It uses the same store and safety contracts as MCP; the browser never accesses the filesystem directly.
+The first startup with durable history copies legacy catalogue events before trimming each topic catalogue to its recent ring. If local testing requires switching back to v0.5, run `topical prepare-v0.5-rollback --confirm` while this version is still checked out, stop it, and then start v0.5. The command reconstructs v0.5-compatible history-bearing catalogues from the durable records; it does not change Markdown content or delete `.topical-history`.
+
+Topical also includes a localhost-only management UI with an accessible tabbed file/change-history sidebar, complete lazy file/history overlays, exact-file grouped search, Markdown editing and preview, taxonomy guidance, recoverable trash, publication checkpoints, and index health. It uses the same store and safety contracts as MCP; the browser never accesses the filesystem directly.
 
 ## Install and configure
 
@@ -69,7 +71,7 @@ For development, `npm run preflight` checks the runtime without loading native d
 
 If an MCP host reports that Topical exited, closed its connection, or exposed no tools:
 
-1. Run `node --version`; Topical v0.5 requires Node 24.x.
+1. Run `node --version`; Topical v0.6 requires Node 24.x.
 2. Run `nvm install`, `nvm use`, and `npm ci` in the Topical checkout.
 3. Run `nvm which 24` and place that absolute executable in the MCP server's `command` setting. Do not rely on the host resolving `node` through your interactive shell.
 4. Confirm `TOPICAL_ROOT` is set in the MCP server environment to an absolute, dedicated directory. Adding the directory as a workspace root does not configure the MCP process.
@@ -115,7 +117,11 @@ npm run ui -- --no-open
 
 An installed package also exposes `topical ui`. The UI works offline and does not require an account. Phase 1 intentionally has no remote-bind option.
 
-Every content or metadata save requires a concise audit description and the hash of the version that was read. If Markdown changes elsewhere, the UI shows the current file beside the unsaved draft and requires explicit review before retrying. Deletes remain recoverable trash operations, tag warnings remain advisory, reindexing rebuilds only derived state, and publication guidance never synchronizes a destination automatically.
+The topic sidebar keeps its file and recent-change lists in one collapsible tabbed browser with an independently scrollable area capped at 750px; tags, hashes, catalogue actions, creation, and trash controls stay outside that list. The page header also opens the complete lazy file and change-history dialogs directly.
+
+External changes do not automatically replace or reposition the visible view. A compact update indicator above the left search field lists the topics that changed; its explicit refresh button applies those changes while preserving the current page and sidebar scroll positions. Local saves continue to update immediately.
+
+Every content or metadata save requires a concise audit description and the hash of the version that was read. If Markdown changes elsewhere and the user explicitly refreshes, the UI shows the current file beside the unsaved draft and requires explicit review before retrying. Deletes remain recoverable trash operations, tag warnings remain advisory, reindexing rebuilds only derived state, and publication guidance never synchronizes a destination automatically.
 
 The local server rejects non-loopback Host headers, cross-origin mutations, non-JSON writes, and requests without its per-run CSRF token. It serves only bundled assets with a restrictive content security policy; rendered Markdown does not enable embedded HTML.
 
@@ -146,6 +152,10 @@ TOPICAL_PUBLISH_ROOTS=docs=/absolute/path/to/project/docs;notes=/absolute/path/t
 ```text
 topical-files/
   index.json
+  .topical-history/
+    manifest.json
+    events/
+    history.sqlite       # rebuildable lookup
   hue-lighting-effects/
     context.md
     index.json
@@ -155,14 +165,19 @@ topical-files/
 
 `context.md` includes YAML-style frontmatter for the topic title, summary, tags, and timestamps. Its body remains ordinary Markdown. Extra Markdown files are for focused context such as a sub-feature, ticket, PR, or research thread.
 
+Keep `context.md` concise: purpose, current status, immediate decisions or questions, next actions, and links to focused files. Substantial plans, research, dated logs, and handoffs belong in supporting Markdown. The 2,000–4,000 body-character target is advisory; `analyze_topic_context` reports findings but never rewrites content.
+
 ## Tools
 
 - `search_topics` returns topic-grouped results. It tries strict matching first, a clearly marked relaxed fallback second, and only after both are empty may apply a conservative, visible one-edit expansion.
+- `search_topic_files` pages through every file match for one returned topic while keeping the initial grouped response bounded.
 - `list_topics` lists bounded pages of topics by recent activity, title, or creation time.
+- `list_topic_files` returns bounded, filterable file descriptors sorted by recent activity, name, or size.
 - `list_tags` reports tag usage and advisory taxonomy warnings without rewriting Markdown.
 - `list_history` returns bounded audit-history pages, and `get_system_health` reports catalogue and disposable-cache health.
 - `create_topic`, `read_topic_file`, and `update_topic_file` manage core context.
-- `get_topic_overview` returns a bounded briefing, file inventory, and recent history before an agent reads detailed notes.
+- `get_topic_overview` returns selectable, bounded context, file, history, and publication fields before an agent reads detailed notes.
+- `analyze_topic_context` reports advisory context size, section-sprawl, dated-heading, and broken-link findings without writing.
 - `create_topic_file` and `delete_topic_file` manage supporting Markdown files.
 - `update_topic_metadata` edits frontmatter safely.
 - `delete_topic` moves a topic to recoverable `.trash` storage instead of permanently deleting it; `list_trash` and `restore_trash` provide explicit recovery.
@@ -176,13 +191,16 @@ All mutation tools require a one-sentence `description`. It is recorded in the r
 | Tool | Important inputs | Result |
 | --- | --- | --- |
 | `search_topics` | `query`, optional exact `tags`, `limit` | `{ query, analysis, matchMode, expansions, topics }`, with each topic returned once and bounded file hits, clean snippets, matched terms, and matched fields. |
+| `search_topic_files` | `query`, `topic`, `matchMode`, optional `cursor`, `limit` | Every matching file for one search result through bounded cursor pages. |
 | `list_topics` | optional `sort`, `tags`, `cursor`, `limit` | `{ topics, page }` with topic summaries and an opaque next cursor. |
+| `list_topic_files` | `topic`, optional `query`, `sort`, `cursor`, `limit` | Bounded file descriptors and an opaque next cursor. |
 | `list_tags` | optional `query`, `cursor`, `limit` | Bounded taxonomy usage, guidance, and advisory warnings. |
-| `list_history` | optional `topic`, `cursor`, `limit` | `{ events, page }` in newest-first order. |
-| `get_system_health` | none | Read-only catalogue and SQLite search-cache health. |
+| `list_history` | optional `topic`, `action`, `pathQuery`, `cursor`, `limit` | `{ events, page }` in stable newest-first order. |
+| `get_system_health` | none | Read-only catalogue, durable history, and SQLite search-cache health. |
 | `create_topic` | `title`, `summary`, `tags`, `initialContent`, `description` | Topic ID and `context.md` path. |
 | `read_topic_file` | `topic`, optional `filePath` | Markdown content and a SHA-256 `hash`. |
-| `get_topic_overview` | `topic`, optional `maxChars` | Bounded `context.md` briefing, file inventory, and recent history. |
+| `get_topic_overview` | `topic`, optional `include`, context/file bounds and cursor | Selectable bounded briefing fields; full Markdown remains an explicit file read. |
+| `analyze_topic_context` | `topic` | Read-only advisory analysis; never reorganizes topic content. |
 | `update_topic_file` | `topic`, `filePath`, `mode`, `content`, optional `section`, `expectedHash`, `description` | Updated file path and hash. |
 | `create_topic_file` | `topic`, `filePath`, `content`, `description` | New supporting Markdown file and hash. |
 | `delete_topic_file` | `topic`, `filePath`, `expectedHash`, `confirm: true`, `description` | Recoverable trash entry. |
@@ -204,9 +222,10 @@ For efficient model context, use this sequence:
 
 1. `search_topics` to find likely topic files from the lexical index.
 2. `get_topic_overview` to understand the topic and select the small number of relevant files.
-3. `read_topic_file` only for those files, then make a focused update.
+3. Follow `list_topic_files` or `search_topic_files` cursors only when more candidates are needed.
+4. `read_topic_file` only for the selected files, then make a focused update in a supporting file when the material is substantial.
 
-`search_topics` ranks title, summary, tag, heading, path, body, and derived technical-identifier aliases through SQLite FTS5. Accent-insensitive `unicode61` tokenization is language-agnostic and does not apply English-only stemming. A one-edit expansion is considered only when strict and relaxed exact-token passes are both empty, is rejected when ambiguous, and is reported in `expansions`. FTS5 stores postings rather than a second copy of Markdown; Topical reads only the best candidate files to produce final snippets, and YAML frontmatter is never used as snippet text.
+`search_topics` ranks title, summary, tag, heading, path, body, and derived technical-identifier aliases through SQLite FTS5. Accent-insensitive `unicode61` tokenization is language-agnostic and does not apply English-only stemming. A one-edit expansion is considered only when strict and relaxed exact-token passes are both empty, is rejected when ambiguous, and is reported in `expansions`. The disposable cache retains indexed body text so a normal mutation can update one document without rereading unrelated Markdown; authoritative snippets still come from only the best candidate files, and YAML frontmatter is never used as snippet text.
 
 An empty query behaves like a bounded topic listing. A non-empty query reports `matchMode: "strict"` when every meaningful term matched somewhere in the topic. If no strict topic exists, Topical retries with coverage-ranked matching and reports `matchMode: "relaxed"`; widening is never silent.
 
@@ -239,6 +258,7 @@ updated_at: 2026-07-18T14:00:00.000Z
 - Writes use temporary files followed by rename; index data is rebuildable.
 - Updates can include `expectedHash`, preventing an agent from overwriting content it read before somebody else changed it.
 - The SQLite search database is derived state inside a protected real directory. Cache symlinks are rejected, rebuilds are integrity-checked before replacement, and loss of the cache never requires a Markdown migration.
+- Complete audit events are durable immutable records under `.topical-history`; its SQLite lookup is rebuildable from those records, and stable cursors keep an in-progress traversal from shifting when new events arrive.
 
 ## Contributing and security
 
@@ -265,10 +285,10 @@ npm ci
 npm pack
 ```
 
-This produces a file such as `topical-mcp-0.5.0.tgz`. Transfer that file to the target machine, then install only the runtime dependencies:
+This produces a file such as `topical-mcp-0.6.0.tgz`. Transfer that file to the target machine, then install only the runtime dependencies:
 
 ```bash
-npm install --global ./topical-mcp-0.5.0.tgz --omit=dev
+npm install --global ./topical-mcp-0.6.0.tgz --omit=dev
 ```
 
 Start the GUI server:

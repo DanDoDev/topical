@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, symlink, unlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -134,6 +134,10 @@ test("long-lived stores observe external topic and search-index replacements", a
   assert.ok(topics.topics.some((topic) => topic.id === "external-penguin"));
   assert.equal(search.topics[0]?.topic, "external-penguin");
   assert.notEqual(after.revision, before.revision);
+  assert.equal(after.recentChanges[0].topic, "external-penguin");
+  assert.equal(after.recentChanges[0].title, "External Penguin");
+  assert.equal(after.recentChanges[0].action, "create_topic");
+  assert.equal(after.recentChanges[0].path, "context.md");
 });
 
 test("missing derived indexes can be rebuilt from Markdown without data loss", async () => {
@@ -249,6 +253,139 @@ test("topic, history, and health reads are bounded, stable, and read-only", asyn
   assert.equal(health.search.fts5, true);
   assert.equal(health.rebuildRecommended, false);
   assert.equal(await readFile(rootPath, "utf8"), before);
+});
+
+test("lean overviews, complete file paging, and exact search-file paging stay bounded", async () => {
+  const { store } = await createStore();
+  await store.createTopic({ title: "Bounded workspace", summary: "Paged file fixture.", tags: [], description: "Created the bounded workspace fixture." });
+  for (let index = 0; index < 7; index += 1) {
+    await store.createTopicFile({ topic: "bounded-workspace", filePath: `research/note-${index}.md`, content: `# Finding ${index}\n\nShared narwhal evidence ${index}.`, description: `Added generated research note ${index}.` });
+  }
+
+  const lean = await store.getTopicOverview({ topic: "bounded-workspace", include: [] });
+  assert.deepEqual(Object.keys(lean).sort(), ["metadata", "topic"]);
+  const overview = await store.getTopicOverview({ topic: "bounded-workspace", include: ["files"], fileLimit: 3 });
+  assert.equal(overview.files.length, 3);
+  assert.equal(overview.files[0].path, "context.md");
+  assert.equal(overview.filePage.total, 8);
+  assert.ok(overview.filePage.nextCursor);
+
+  const paths = [];
+  let cursor;
+  do {
+    const page = await store.listTopicFiles({ topic: "bounded-workspace", sort: "name", limit: 3, cursor });
+    paths.push(...page.files.map((file) => file.path));
+    cursor = page.page.nextCursor;
+  } while (cursor);
+  assert.equal(paths.length, 8);
+  assert.equal(new Set(paths).size, 8);
+
+  const initialSearch = await store.searchTopics({ query: "narwhal evidence" });
+  assert.equal(initialSearch.topics[0].fileMatchCount, 7);
+  assert.equal(initialSearch.topics[0].files.length, 3);
+  const matchingPaths = [];
+  cursor = undefined;
+  do {
+    const page = await store.searchTopicFiles({ query: "narwhal evidence", topic: "bounded-workspace", matchMode: initialSearch.matchMode, limit: 3, cursor });
+    matchingPaths.push(...page.files.map((file) => file.path));
+    cursor = page.page.nextCursor;
+  } while (cursor);
+  assert.equal(matchingPaths.length, 7);
+  assert.ok(matchingPaths.every((filePath) => filePath.startsWith("research/")));
+});
+
+test("normal file mutations keep recent history small and update search without replacing its database", async () => {
+  const { root, store } = await createStore();
+  await store.createTopic({ title: "Incremental writes", summary: "One-file mutation fixture.", tags: [], description: "Created the incremental-write fixture." });
+  await store.createTopicFile({ topic: "incremental-writes", filePath: "changed.md", content: "Old cobalt marker.", description: "Added the changing file." });
+  await store.createTopicFile({ topic: "incremental-writes", filePath: "untouched.md", content: "Stable amber marker.", description: "Added the untouched file." });
+  const cachePath = path.join(root, ".topical-cache", "search.sqlite");
+  const beforeCache = await stat(cachePath, { bigint: true });
+  const changed = await store.readTopicFile({ topic: "incremental-writes", filePath: "changed.md" });
+  await store.updateTopicFile({ topic: "incremental-writes", filePath: "changed.md", content: "New violet marker.", expectedHash: changed.hash, description: "Updated only the changing file." });
+  const afterCache = await stat(cachePath, { bigint: true });
+  assert.equal(afterCache.ino, beforeCache.ino, "incremental updates must not replace the complete search database");
+  assert.equal((await store.searchTopics({ query: "violet marker" })).topics[0]?.files[0]?.path, "changed.md");
+  assert.equal((await store.searchTopics({ query: "stable amber" })).topics[0]?.files[0]?.path, "untouched.md");
+
+  let context = await store.readTopicFile({ topic: "incremental-writes" });
+  for (let index = 0; index < 14; index += 1) {
+    context = await store.updateTopicMetadata({ topic: "incremental-writes", summary: `Revision ${index}.`, expectedHash: context.hash, description: `Recorded generated metadata revision ${index}.` });
+  }
+  const topicIndex = JSON.parse(await readFile(path.join(root, "incremental-writes", "index.json"), "utf8"));
+  const history = await store.listHistory({ topic: "incremental-writes", limit: 100 });
+  assert.equal(topicIndex.recentHistory.length, 12);
+  assert.equal(Object.hasOwn(topicIndex, "history"), false);
+  assert.equal(history.page.total, 18);
+});
+
+test("context analysis is advisory and leaves large routing documents unchanged", async () => {
+  const { store } = await createStore();
+  const body = `# Current status\n\n${"Detailed project log. ".repeat(240)}\n\n## August 2026\n\n[Focused plan](plan.md)\n[Missing](missing.md)`;
+  await store.createTopic({ title: "Context advisor", summary: "Analysis-only fixture.", tags: [], initialContent: body, description: "Created the context-advisor fixture." });
+  await store.createTopicFile({ topic: "context-advisor", filePath: "plan.md", content: "# Focused plan\n", description: "Added the focused plan fixture." });
+  const before = await store.readTopicFile({ topic: "context-advisor" });
+  const analysis = await store.analyzeTopicContext({ topic: "context-advisor" });
+  const after = await store.readTopicFile({ topic: "context-advisor" });
+  assert.equal(analysis.mode, "analyze_only");
+  assert.equal(analysis.changed, false);
+  assert.equal(analysis.context.aboveTarget, true);
+  assert.ok(analysis.findings.some((finding) => finding.code === "ABOVE_CONTEXT_BUDGET"));
+  assert.deepEqual(analysis.details.brokenLinks, ["missing.md"]);
+  assert.equal(after.hash, before.hash);
+});
+
+test("legacy catalogue history migrates idempotently before the topic ring is trimmed", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "topical-legacy-history-test-"));
+  const topicDirectory = path.join(root, "legacy-history");
+  await mkdir(topicDirectory);
+  await writeFile(path.join(topicDirectory, "context.md"), `---\ntitle: "Legacy history"\nsummary: "Migration fixture."\ntags: []\ncreated_at: 2026-01-01T00:00:00.000Z\nupdated_at: 2026-01-01T00:00:00.000Z\n---\n\n# Legacy history\n`, "utf8");
+  const history = Array.from({ length: 130 }, (_, index) => ({
+    at: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString(),
+    action: index === 0 ? "create_topic" : "update_file",
+    path: "context.md",
+    description: `Legacy event ${index}.`
+  }));
+  await writeFile(path.join(topicDirectory, "index.json"), `${JSON.stringify({ version: 5, topic: { id: "legacy-history", title: "Legacy history", summary: "Migration fixture.", tags: [] }, files: ["context.md"], history }, null, 2)}\n`, "utf8");
+  const otherDirectory = path.join(root, "other-history");
+  await mkdir(otherDirectory);
+  await writeFile(path.join(otherDirectory, "context.md"), `---\ntitle: "Other history"\nsummary: "Interleaved migration fixture."\ntags: []\ncreated_at: 2026-01-01T00:00:00.000Z\nupdated_at: 2026-01-01T00:00:00.000Z\n---\n\n# Other history\n`, "utf8");
+  await writeFile(path.join(otherDirectory, "index.json"), `${JSON.stringify({ version: 5, topic: { id: "other-history", title: "Other history", summary: "Interleaved migration fixture.", tags: [] }, files: ["context.md"], history: [
+    { at: "2026-01-01T00:00:30.000Z", action: "create_topic", path: "context.md", description: "Other legacy event zero." },
+    { at: "2026-01-01T00:01:30.000Z", action: "update_file", path: "context.md", description: "Other legacy event one." }
+  ] }, null, 2)}\n`, "utf8");
+
+  const store = new TopicalStore(root);
+  await store.initialize();
+  const first = await store.listHistory({ topic: "legacy-history", limit: 100 });
+  const second = await store.listHistory({ topic: "legacy-history", cursor: first.page.nextCursor, limit: 100 });
+  const migratedIndex = JSON.parse(await readFile(path.join(topicDirectory, "index.json"), "utf8"));
+  assert.equal(first.page.total, 130);
+  assert.equal(first.events.length + second.events.length, 130);
+  assert.equal(migratedIndex.recentHistory.length, 12);
+  assert.equal(Object.hasOwn(migratedIndex, "history"), false);
+  const globalFirst = await store.listHistory({ limit: 100 });
+  const globalSecond = await store.listHistory({ cursor: globalFirst.page.nextCursor, limit: 100 });
+  const globalEvents = [...globalFirst.events, ...globalSecond.events];
+  assert.equal(globalEvents.length, 132);
+  assert.ok(globalEvents.every((event, index) => index === 0 || globalEvents[index - 1].at >= event.at), "interleaved per-topic legacy events must migrate into global timestamp order");
+  const rollback = await store.prepareV05Rollback({ confirm: true });
+  const rollbackRoot = JSON.parse(await readFile(path.join(root, "index.json"), "utf8"));
+  const rollbackTopic = JSON.parse(await readFile(path.join(topicDirectory, "index.json"), "utf8"));
+  assert.deepEqual({ status: rollback.status, topics: rollback.topics, events: rollback.events }, { status: "ready_for_v0.5", topics: 2, events: 132 });
+  assert.equal(rollbackRoot.version, 4);
+  assert.equal(rollbackTopic.version, 5);
+  assert.equal(rollbackTopic.history.length, 130);
+  assert.equal(Object.hasOwn(rollbackTopic, "recentHistory"), false);
+  await store.close();
+  rollbackTopic.history.push({ at: "2026-01-01T03:00:00.000Z", action: "update_file", path: "context.md", description: "Event written during the v0.5 rollback window." });
+  await writeFile(path.join(topicDirectory, "index.json"), `${JSON.stringify(rollbackTopic, null, 2)}\n`, "utf8");
+
+  const reopened = new TopicalStore(root);
+  await reopened.initialize();
+  assert.equal((await reopened.listHistory({ topic: "legacy-history", limit: 1 })).page.total, 131);
+  assert.equal((await reopened.listHistory({ limit: 1 })).page.total, 133);
+  await reopened.close();
 });
 
 test("metadata, deletion, and restore require reviewed hashes", async () => {
