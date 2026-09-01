@@ -117,6 +117,19 @@ npm run ui -- --no-open
 
 An installed package also exposes `topical ui`. The UI works offline and does not require an account. Phase 1 intentionally has no remote-bind option.
 
+### zsh/NVM shortcut for an installed package
+
+If your normal zsh session uses a Node version other than 24, add this after your NVM initialization in `~/.zshrc`. Replace the example root with your dedicated topic directory:
+
+```zsh
+export TOPICAL_ROOT="$HOME/path/to/topical-files"
+topical() {
+  nvm exec --silent 24 topical "$@"
+}
+```
+
+Open a new terminal, then run `topical ui`. This wrapper uses Node 24 only for Topical and leaves your shell's default Node version unchanged.
+
 The topic sidebar keeps its file and recent-change lists in one collapsible tabbed browser with an independently scrollable area capped at 750px; tags, hashes, catalogue actions, creation, and trash controls stay outside that list. The page header also opens the complete lazy file and change-history dialogs directly.
 
 External changes do not automatically replace or reposition the visible view. A compact update indicator above the left search field lists the topics that changed; its explicit refresh button applies those changes while preserving the current page and sidebar scroll positions. Local saves continue to update immediately.
