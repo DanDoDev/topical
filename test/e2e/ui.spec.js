@@ -113,7 +113,7 @@ test("browse, search, edit, and audit through the loopback UI", async ({ page })
   await expect(activeWorkspace.locator(".file-list").getByRole("button", { name: /observations\.md/ })).toBeVisible();
   await expect(page.getByRole("tab", { name: /observations\.md/ })).toBeVisible();
   const fileTimestamp = page.locator(".workspace-slot:not([hidden]) .file-label small").first();
-  await expect(fileTimestamp.getByText(/Updated August/)).toBeVisible();
+  await expect(fileTimestamp.getByText(/^Updated [A-Z][a-z]+ \d{1,2}(st|nd|rd|th), \d{4}$/)).toBeVisible();
   await expect(fileTimestamp.getByText(/^at \d{1,2}:\d{2} [AP]M$/)).toBeVisible();
   expect(await fileTimestamp.evaluate((element) => ({ children: element.childElementCount, clipped: element.scrollWidth > element.clientWidth }))).toEqual({ children: 2, clipped: false });
   const browserGroup = page.locator(".tab-group").filter({ has: page.locator(".tab-group-label", { hasText: "Browser Fixture" }) });
