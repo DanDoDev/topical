@@ -115,10 +115,13 @@ export function createHttpServer({ application, csrfToken = randomBytes(32).toSt
     version: TOPICAL_VERSION,
     csrfToken,
     ...(await application.getRevision()),
-    capabilities: ["topics", "search", "editing", "taxonomy", "history", "paged-history", "trash", "publications", "health", "reindex", "manual-refresh", "change-notifications", "catalogue-inspection", "context-analysis"]
+    capabilities: ["topics", "search", "tasks", "workflows", "editing", "taxonomy", "history", "paged-history", "trash", "publications", "health", "reindex", "manual-refresh", "change-notifications", "catalogue-inspection", "context-analysis"]
   }));
   server.get("/api/v1/revision", endpoint(z.object({ topic: topic.optional() }), (request) => request.query, (input) => application.getRevision(input)));
   server.get("/api/v1/topics", endpoint(topicListQuery, (request) => request.query, (input) => application.listTopics(input)));
+  server.get("/api/v1/tasks", endpoint(pagedQuery.extend({ topic: topic.optional(), pathPrefix: z.string().max(1000).default(""), status: z.enum(["open", "completed", "all"]).default("open") }), (request) => request.query, (input) => application.listTasks(input)));
+  server.patch("/api/v1/task", endpoint(z.object({ topic, filePath, offset: z.number().int().min(0), completed: z.boolean(), expectedHash: hash, description }), (request) => request.body, (input) => application.setTaskCompleted(input)));
+  server.post("/api/v1/work-areas", endpoint(z.object({ topic, kind: z.enum(["issue", "plan", "draft"]), slug: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(100), title: z.string().trim().min(1).max(160), brief: z.string().max(4000).default(""), parentFile: filePath.default("context.md"), expectedHash: hash, description }), (request) => request.body, (input) => application.createWorkArea(input)));
   server.get("/api/v1/topics/:topic/overview", endpoint(z.object({
     topic,
     include: z.preprocess(queryList, z.array(z.enum(["context", "files", "history", "publications"])).max(4).optional()),
@@ -153,7 +156,7 @@ export function createHttpServer({ application, csrfToken = randomBytes(32).toSt
   server.get("/api/v1/publications", endpoint(pagedQuery.extend({ topic: topic.optional(), includeArchived: z.preprocess((value) => value === "true", z.boolean()).default(false) }), (request) => request.query, (input) => application.listPublications(input)));
   server.get("/api/v1/publications/:id", endpoint(z.object({ id: uuid }), (request) => request.params, (input) => application.readPublication(input)));
 
-  server.post("/api/v1/topics", endpoint(z.object({ title: z.string().trim().min(1).max(160), summary: z.string().max(500).default(""), tags, initialContent: z.string().max(MAX_MARKDOWN_BYTES).default(""), description }), (request) => request.body, (input) => application.createTopic(input)));
+  server.post("/api/v1/topics", endpoint(z.object({ title: z.string().trim().min(1).max(160), summary: z.string().max(500).default(""), tags, initialContent: z.string().max(MAX_MARKDOWN_BYTES).default(""), template: z.enum(["oncall", "project", "documentation", "planning"]).optional(), description }), (request) => request.body, (input) => application.createTopic(input)));
   server.post("/api/v1/topic-files", endpoint(z.object({ topic, filePath, content: z.string().max(MAX_MARKDOWN_BYTES).default(""), description }), (request) => request.body, (input) => application.createTopicFile(input)));
   server.patch("/api/v1/topic-file", endpoint(z.object({ topic, filePath: filePath.default("context.md"), mode: z.enum(["append", "replace", "replace_section"]).default("replace"), content: z.string().max(MAX_MARKDOWN_BYTES), section: z.string().optional(), expectedHash: hash, description }), (request) => request.body, (input) => application.updateTopicFile(input)));
   server.patch("/api/v1/topic-metadata", endpoint(z.object({ topic, title: z.string().trim().min(1).max(160).optional(), summary: z.string().max(500).optional(), tags: tags.optional(), expectedHash: hash, description }), (request) => request.body, (input) => application.updateTopicMetadata(input)));

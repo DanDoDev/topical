@@ -42,6 +42,14 @@ The normal `context.md` body target is approximately 2,000–4,000 characters. T
 
 Do not ask for a filesystem path merely to locate existing Topical notes. If Topical MCP tools are unavailable, say that clearly and then request an alternative.
 
+## Structured workflows and tasks
+
+For on-call, documentation, planning, or handoff work, read [references/workflows.md](references/workflows.md). Reuse the selected topic and work area; adapt these conventions to the user's structure.
+
+Use `list_tasks` for outstanding actions across topics instead of opening every Markdown file. Scope by topic and work-area `pathPrefix`, follow cursors, and read owning context only when needed. Store each action once as a Markdown checkbox. Code examples and quotes are excluded; a standalone `<!-- topical:tasks off -->` comment excludes a whole file. Draft starters include this marker so procedural checklists do not become personal tasks.
+
+Use `set_task_completed` with the task's `offset` and `sourceHash` as `expectedHash`. On conflict, refresh and review before retrying. Completion edits the original file. External filesystem edits require `reindex_topical`; refreshing tasks alone does not discover them.
+
 ## Recover an unavailable MCP
 
 If Topical is enabled but its tools are missing or the connection closes during startup:

@@ -30,6 +30,8 @@
     "benchmark:relevance": "node benchmark/run-relevance-evaluation.js",
     "prebenchmark:context-efficiency": "node src/runtime-preflight.js",
     "benchmark:context-efficiency": "node benchmark/run-context-efficiency-baseline.js",
+    "prebenchmark:tasks": "node src/runtime-preflight.js",
+    "benchmark:tasks": "node benchmark/run-tasks.js",
     "prepack": "npm run build:ui"
   },
   "engines": {
@@ -40,6 +42,9 @@
     "@modelcontextprotocol/sdk": "^1.30.0",
     "better-sqlite3": "^13.0.3",
     "fastify": "^5.6.2",
+    "mdast-util-from-markdown": "^2.0.3",
+    "mdast-util-gfm-task-list-item": "^2.0.0",
+    "micromark-extension-gfm-task-list-item": "^2.1.0",
     "zod": "^3.25.76"
   },
   "devDependencies": {

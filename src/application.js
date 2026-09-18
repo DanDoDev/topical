@@ -34,6 +34,9 @@ export class TopicalApplication {
   searchTopics(input) { return this.store.searchTopics(input); }
   searchTopicFiles(input) { return this.store.searchTopicFiles(input); }
   listTopics(input) { return this.store.listTopics(input); }
+  listTasks(input) { return this.store.listTasks(input); }
+  setTaskCompleted(input) { return this.store.setTaskCompleted(input); }
+  createWorkArea(input) { return this.store.createWorkArea(input); }
   listTopicFiles(input) { return this.store.listTopicFiles(input); }
   listTags(input) { return this.store.listTags(input); }
   listHistory(input) { return this.store.listHistory(input); }

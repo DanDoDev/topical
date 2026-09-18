@@ -22,6 +22,30 @@ function headers(extra = {}) {
   return { host, origin, "sec-fetch-site": "same-origin", "x-topical-csrf": "test-token", ...extra };
 }
 
+test("HTTP workflow and task routes share source hashes, pagination, and write protections", async (t) => {
+  const { server, application } = await createServer();
+  t.after(async () => { await server.close(); await application.close(); });
+  const request = (method, url, payload) => server.inject({ method, url: `/api/v1${url}`, headers: headers({ "content-type": "application/json" }), ...(payload ? { payload } : {}) });
+  const created = await request("POST", "/topics", { title: "Workflow fixture", template: "oncall", description: "Started the fixture." });
+  assert.equal(created.statusCode, 200);
+  const topic = created.json().topic;
+  const parent = (await request("GET", `/topic-file?topic=${topic}`)).json();
+  const work = await request("POST", "/work-areas", { topic, kind: "plan", slug: "recovery", title: "Recovery plan", brief: "- [ ] Verify backups\n- [ ] Verify restore", expectedHash: parent.hash, description: "Created recovery planning work." });
+  assert.equal(work.statusCode, 200, work.body);
+  const page = (await request("GET", `/tasks?topic=${topic}&limit=1`)).json();
+  assert.equal(page.tasks.length, 1);
+  assert.ok(page.page.nextCursor);
+  assert.equal(page.counts.open, 2);
+  const task = page.tasks[0];
+  const payload = { topic, filePath: task.path, offset: task.offset, completed: true, expectedHash: task.sourceHash, description: "Verified the backup task." };
+  const denied = await server.inject({ method: "PATCH", url: "/api/v1/task", headers: { host, origin, "content-type": "application/json" }, payload });
+  assert.equal(denied.statusCode, 403);
+  assert.equal((await request("PATCH", "/task", payload)).statusCode, 200);
+  assert.equal((await request("PATCH", "/task", payload)).statusCode, 409);
+  assert.equal((await request("GET", "/tasks?limit=1000")).statusCode, 400);
+  assert.equal((await request("GET", `/tasks?topic=${topic}&status=completed`)).json().tasks.length, 1);
+});
+
 test("HTTP bootstrap is loopback-only and exposes a per-run mutation token", async (t) => {
   const { server, application } = await createServer();
   t.after(async () => { await server.close(); await application.close(); });

@@ -14,7 +14,7 @@ import {
 } from "./normalization.js";
 import { SearchIndex, SEARCH_MATCH_MODE } from "./search-index.js";
 
-export const SEARCH_SCHEMA_VERSION = 5;
+export const SEARCH_SCHEMA_VERSION = 6;
 const CACHE_DIRECTORY = ".topical-cache";
 const CACHE_FILENAME = "search.sqlite";
 const MAX_FILE_HITS = 3;
@@ -144,6 +144,17 @@ function createSchema(database) {
     ) STRICT;
 
     CREATE INDEX records_topic_path ON records(topic, path);
+
+    CREATE TABLE tasks (
+      record_id INTEGER NOT NULL REFERENCES records(id) ON DELETE CASCADE,
+      offset INTEGER NOT NULL,
+      line INTEGER NOT NULL,
+      text TEXT NOT NULL,
+      heading TEXT NOT NULL,
+      completed INTEGER NOT NULL CHECK(completed IN (0, 1)),
+      PRIMARY KEY(record_id, offset)
+    ) STRICT;
+    CREATE INDEX tasks_completion ON tasks(completed, record_id);
 
     CREATE VIRTUAL TABLE search USING fts5(
       title,
@@ -280,6 +291,7 @@ function insertTopic(database, snapshot) {
       updatedAt: document.updatedAt || null,
       body: document.body || ""
     });
+    insertTasks(database, record.lastInsertRowid, document.tasks);
     insertSearch.run({
       rowid: record.lastInsertRowid,
       title: "",
@@ -350,8 +362,14 @@ function replaceDocumentRows(database, topic, documentPath, document) {
     INSERT INTO records(record_key, kind, topic, path, headings_json, excerpt, hash, size, updated_at, body)
     VALUES (?, 'document', ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(`document:${topic}:${document.path}`, topic, document.path, JSON.stringify(document.headings || []), document.excerpt || "", document.hash || null, document.size ?? null, document.updatedAt || null, document.body || "");
+  insertTasks(database, record.lastInsertRowid, document.tasks);
   database.prepare(`INSERT INTO search(rowid, title, summary, tags, path, headings, body, aliases) VALUES (?, '', '', '', ?, ?, ?, ?)`)
     .run(record.lastInsertRowid, document.path, (document.headings || []).join("\n"), document.body || "", aliasText(aliases));
+}
+
+function insertTasks(database, recordId, tasks = []) {
+  const insert = database.prepare("INSERT INTO tasks(record_id, offset, line, text, heading, completed) VALUES (?, ?, ?, ?, ?, ?)");
+  for (const task of tasks) insert.run(recordId, task.offset, task.line, task.text, task.heading, Number(task.completed));
 }
 
 function refreshTopicAggregate(database, topic, topicRowId) {
@@ -539,6 +557,36 @@ export class SqliteSearchIndex extends SearchIndex {
       database.prepare("UPDATE metadata SET value = ? WHERE key = 'built_at'").run(new Date().toISOString());
     })();
     return this.health();
+  }
+
+  async listTasks({ topic, pathPrefix = "", status = "open", cursor, limit = 50 } = {}) {
+    await this.#inspect();
+    const database = this.#requireReady();
+    if (!["open", "completed", "all"].includes(status)) throw new TopicalError("Invalid task status.");
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new TopicalError("limit must be between 1 and 100.");
+    if (typeof pathPrefix !== "string" || pathPrefix.length > 1000) throw new TopicalError("Invalid task path prefix.");
+    const scope = JSON.stringify([topic || null, pathPrefix, status]);
+    const offset = decodeFileCursor(cursor, scope);
+    const clauses = ["r.kind = 'document'"];
+    const values = [];
+    if (topic) { clauses.push("r.topic = ?"); values.push(topic); }
+    if (pathPrefix) {
+      const prefix = pathPrefix.replace(/\/$/, "");
+      clauses.push("(r.path = ? OR substr(r.path, 1, ?) = ?)");
+      values.push(prefix, prefix.length + 1, prefix + "/");
+    }
+    const from = "FROM tasks t JOIN records r ON r.id = t.record_id JOIN topics p ON p.topic = r.topic";
+    const where = clauses.join(" AND ");
+    const counts = database.prepare(`SELECT COUNT(*) AS total, COALESCE(SUM(t.completed), 0) AS completed, COUNT(DISTINCT r.topic) AS topics ${from} WHERE ${where}`).get(...values);
+    const filtered = where + (status === "all" ? "" : ` AND t.completed = ${status === "completed" ? 1 : 0}`);
+    const total = status === "all" ? counts.total : status === "completed" ? counts.completed : counts.total - counts.completed;
+    const rows = database.prepare(`SELECT r.topic, p.title AS topicTitle, r.path, r.hash AS sourceHash, t.offset, t.line, t.text, t.heading, t.completed ${from} WHERE ${filtered} ORDER BY r.topic, r.path, t.offset LIMIT ? OFFSET ?`).all(...values, limit, offset);
+    return {
+      tasks: rows.map((row) => ({ ...row, completed: Boolean(row.completed) })),
+      counts: { ...counts, open: counts.total - counts.completed },
+      page: { limit, total, nextCursor: offset + rows.length < total ? encodeFileCursor(scope, offset + rows.length) : null },
+      freshness: { indexedAt: database.prepare("SELECT value FROM metadata WHERE key = 'built_at'").pluck().get(), externalEdits: "Run reindex after external Markdown edits." }
+    };
   }
 
   #allowedTopics(tags) {

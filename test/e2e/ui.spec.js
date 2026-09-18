@@ -51,7 +51,7 @@ test("browse, search, edit, and audit through the loopback UI", async ({ page })
 
   await page.getByRole("button", { name: /Search/ }).first().click();
   await page.getByPlaceholder("Search titles, tags, headings, and Markdown…").fill("recherche multilingue");
-  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("main").getByRole("button", { name: "Search", exact: true }).click();
   await expect(page.getByText("strict", { exact: true })).toBeVisible();
   const resultTag = page.locator(".result-card").filter({ hasText: "Browser Fixture" }).getByLabel("Show topics tagged ui");
   const resultTagBox = await resultTag.boundingBox();

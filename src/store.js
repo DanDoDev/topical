@@ -24,6 +24,8 @@ import {
 import { paginate } from "./pagination.js";
 import { queryWithRelaxedFallback } from "./search-index.js";
 import { SqliteSearchIndex } from "./sqlite-search-index.js";
+import { extractTasks } from "./tasks.js";
+import { topicStarter, workStarter, workPath, linkWork } from "./workflows.js";
 
 const ROOT_INDEX_VERSION = 5;
 const TOPIC_INDEX_VERSION = 6;
@@ -510,7 +512,8 @@ export class TopicalStore {
       size: Buffer.byteLength(content, "utf8"),
       hash: hash(content),
       updatedAt: details.mtime.toISOString(),
-      body
+      body,
+      tasks: extractTasks(content)
     };
   }
 
@@ -540,7 +543,7 @@ export class TopicalStore {
     if (change.documentPath) {
       rootIndex.documents = rootIndex.documents.filter((document) => document.topic !== topic || document.path !== change.documentPath);
       if (change.document) {
-        const { body: _body, ...catalogueDocument } = change.document;
+        const { body: _body, tasks: _tasks, ...catalogueDocument } = change.document;
         rootIndex.documents.push(catalogueDocument);
       }
     } else if (!existed || change.replaceDocuments) {
@@ -584,7 +587,7 @@ export class TopicalStore {
       const context = await readFile(path.join(directory, "context.md"), "utf8");
       metadata = { id: topic, ...parseFrontmatter(context, metadata).metadata };
       const searchDocuments = await this.#buildTopicDocuments(topic, directory, index.files, metadata);
-      index.documents = searchDocuments.map(({ body: _body, ...value }) => value);
+      index.documents = searchDocuments.map(({ body: _body, tasks: _tasks, ...value }) => value);
       index.topic = metadata;
       await writeAtomic(this.root, path.join(directory, "index.json"), JSON.stringify(index, null, 2) + "\n");
       return {
@@ -611,7 +614,7 @@ export class TopicalStore {
         }
         document = await this.#buildTopicDocument(topic, directory, documentPath, metadata);
       }
-      index.documents = [...(index.documents || []).filter((value) => value.path !== documentPath), ...(document ? [(({ body: _body, ...value }) => value)(document)] : [])]
+      index.documents = [...(index.documents || []).filter((value) => value.path !== documentPath), ...(document ? [(({ body: _body, tasks: _tasks, ...value }) => value)(document)] : [])]
         .sort((left, right) => left.path.localeCompare(right.path));
     }
     index.topic = { id: topic, ...metadata };
@@ -659,7 +662,7 @@ export class TopicalStore {
       index.recentHistory = [...(index.recentHistory || index.history || [])].slice(-MAX_RECENT_TOPIC_ACTIONS);
       delete index.history;
       const searchDocuments = await this.#buildTopicDocuments(topic, directory, files, parsed.metadata);
-      index.documents = searchDocuments.map(({ body: _body, ...document }) => document);
+      index.documents = searchDocuments.map(({ body: _body, tasks: _tasks, ...document }) => document);
       await writeAtomic(this.root, path.join(directory, "index.json"), JSON.stringify(index, null, 2) + "\n");
       const lastAction = index.recentHistory.at(-1);
       if (lastAction) events.push({ topic, ...lastAction });
@@ -968,13 +971,17 @@ export class TopicalStore {
     };
   }
 
-  async createTopic({ title, summary, tags = [], initialContent = "", description }) {
+  async createTopic({ title, summary, tags = [], initialContent = "", description, template }) {
     return this.#serial(async () => {
       assertDescription(description);
       assertBoundedText(title, { field: "title", maxChars: CONTRACT_LIMITS.titleChars, allowEmpty: false });
       assertBoundedText(summary ?? "", { field: "summary", maxChars: CONTRACT_LIMITS.summaryChars });
       const cleanTitle = title.trim();
       const cleanSummary = (summary ?? "").trim();
+      if (template) {
+        if (initialContent.trim()) throw new TopicalError("Choose either a template or initial Markdown.");
+        initialContent = topicStarter(template, cleanTitle, cleanSummary);
+      }
       const topic = slugify(cleanTitle);
       const directory = this.#topicDirectory(topic);
       if (await exists(directory)) throw new TopicalError(`Topic '${topic}' already exists.`);
@@ -1003,6 +1010,65 @@ export class TopicalStore {
     const content = await readFile(target, "utf8");
     const details = await stat(target);
     return { topic, path: normalized, content, hash: hash(content), updatedAt: details.mtime.toISOString() };
+  }
+
+  async listTasks(input = {}) {
+    await this.#getRootIndex();
+    if (input.topic !== undefined) await this.#requireTopicDirectory(input.topic);
+    return this.#searchIndex.listTasks(input);
+  }
+
+  async createWorkArea({ topic, kind, slug, title, brief = "", parentFile = "context.md", expectedHash, description }) {
+    return this.#serial(async () => {
+      assertDescription(description);
+      assertBoundedText(title, { field: "title", maxChars: CONTRACT_LIMITS.titleChars, allowEmpty: false });
+      if (/[\r\n]/.test(title)) throw new TopicalError("Work title must be a single line.");
+      assertBoundedText(brief, { field: "brief", maxChars: 4000 });
+      const relative = workPath(kind, slug);
+      const parent = await this.readTopicFile({ topic, filePath: parentFile });
+      const filePath = path.posix.join(path.posix.dirname(parent.path), relative);
+      const content = workStarter(kind, title.trim(), brief);
+      assertMarkdown(content);
+      const directory = await this.#requireTopicDirectory(topic);
+      const target = path.join(directory, filePath);
+      await assertSafeFilesystemPath(this.root, target);
+      const link = `- [${title.trim().replace(/[\\[\]]/g, "\\$&")}](${relative})`;
+      const present = await exists(target);
+      // A retry may safely finish the parent link, but never overwrite evolved work.
+      if (present && await readFile(target, "utf8") !== content) throw conflictError("Work already exists with different content. Open the existing file.", { topic, path: filePath });
+      if (present && parent.content.split(/\r?\n/).includes(link)) return { topic, path: filePath, reused: true };
+      assertExpectedHash(expectedHash, parent.hash, { topic, path: parent.path });
+      const nextParent = linkWork(parent.content, link);
+      assertMarkdown(nextParent);
+      try {
+        if (!present) {
+          await writeAtomic(this.root, target, content);
+          const { change } = await this.#record(topic, "create_file", filePath, description);
+          await this.#upsertTopicInRoot(topic, change);
+          await this.#applySearchChange(change);
+        }
+        // Recheck before changing the parent if another process edited it.
+        const latest = await this.readTopicFile({ topic, filePath: parent.path });
+        assertExpectedHash(parent.hash, latest.hash, { topic, path: parent.path });
+        await writeAtomic(this.root, path.join(directory, parent.path), nextParent);
+        if (parent.path === "context.md") await this.#touchContext(topic, nextParent);
+        const { change } = await this.#record(topic, "update_file", parent.path, description);
+        await this.#upsertTopicInRoot(topic, change);
+        await this.#applySearchChange(change);
+        return { topic, path: filePath, parentFile: parent.path, reused: present };
+      } catch (error) {
+        throw new TopicalError("Work creation did not finish. Inspect the work file and parent, then retry with the current parent hash.", { code: "PARTIAL_WORKFLOW", details: { topic, path: filePath, parentFile: parent.path, cause: error.message } });
+      }
+    });
+  }
+
+  async setTaskCompleted({ topic, filePath, offset, completed, expectedHash, description }) {
+    if (!Number.isInteger(offset) || offset < 0 || typeof completed !== "boolean") throw new TopicalError("A valid task offset and completion state are required.");
+    const current = await this.readTopicFile({ topic, filePath });
+    assertExpectedHash(expectedHash, current.hash, { topic, path: current.path });
+    if (!extractTasks(current.content).some((task) => task.offset === offset)) throw new TopicalError("Task no longer exists at this location. Refresh the task list.");
+    const content = current.content.slice(0, offset) + (completed ? "x" : " ") + current.content.slice(offset + 1);
+    return this.updateTopicFile({ topic, filePath: current.path, mode: "replace", content, expectedHash: current.hash, description });
   }
 
   async readRootCatalogue({ view = "rendered" } = {}) {

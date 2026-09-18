@@ -4,8 +4,10 @@ import { ApiClient, ApiError, connectApi, queryString } from "./api";
 import { formatEnglishDate } from "./dates";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { MarkdownView } from "./MarkdownView";
+import { TasksView } from "./TasksView";
+import { WorkAreaForm } from "./WorkAreaForm";
 
-type View = "topics" | "search" | "tags" | "history" | "trash" | "publications" | "system";
+type View = "topics" | "search" | "tasks" | "tags" | "history" | "trash" | "publications" | "system";
 type Notice = { kind: "error" | "success"; text: string } | null;
 type DocumentTab = { key: string; topic: string; path: string; title: string };
 type FileSort = "recent" | "name" | "size";
@@ -268,6 +270,7 @@ export function App() {
         <nav aria-label="Primary">
           <NavButton active={view === "topics"} onClick={() => navigate("topics")} icon="◫">Topics</NavButton>
           <NavButton active={view === "search"} onClick={() => navigate("search")} icon="⌕">Search</NavButton>
+          <NavButton active={view === "tasks"} onClick={() => navigate("tasks")} icon="☑">Tasks</NavButton>
           <div className="nav-label">Manage</div>
           <NavButton active={view === "tags"} onClick={() => navigate("tags")} icon="#">Tags</NavButton>
           <NavButton active={view === "history"} onClick={() => navigate("history")} icon="↶">History</NavButton>
@@ -295,6 +298,7 @@ export function App() {
       )}
       {tabs.map((tab) => { const active = view === "topics" && !showTopicList && activeTabKey === tab.key; return <div className="workspace-slot" hidden={!active} key={tab.key}><TopicWorkspace api={api} topic={tab.topic} path={tab.path} active={active} refreshRevision={liveRevision} onBack={() => setShowTopicList(true)} onChanged={() => { setTopicsRevision((value) => value + 1); void storeUpdates.acknowledge(); }} onDirtyChange={(dirty) => reportDirty(tab.key, dirty)} onOpenDocument={openDocument} onDeletedFile={() => { closeTab(tab.key, true); openDocument(tab.topic); }} onDeletedTopic={() => { closeTopicTabs(tab.topic); setTopicsRevision((value) => value + 1); void storeUpdates.acknowledge(); }} onTagClick={openTag} /></div>; })}
       {view === "search" && <SearchView api={api} liveRevision={liveRevision} request={searchRequest} onOpen={openDocument} onTagClick={openTag} />}
+      {view === "tasks" && <TasksView api={api} liveRevision={liveRevision} onOpen={openDocument} />}
       {view === "tags" && <TagsView api={api} liveRevision={liveRevision} onTagClick={openTag} />}
       {view === "history" && <HistoryView api={api} liveRevision={liveRevision} onOpenFile={openDocument} />}
       {view === "trash" && <TrashView api={api} liveRevision={liveRevision} />}
@@ -370,7 +374,7 @@ function DocumentTabs({ tabs, activeKey, dirtyTabs, collapsedTopics, onToggleTop
 }
 
 function NavButton({ active, icon, children, onClick }: { active: boolean; icon: string; children: ReactNode; onClick(): void }) {
-  return <button className={`nav-button ${active ? "active" : ""}`} onClick={onClick}><span>{icon}</span>{children}</button>;
+  return <button className={`nav-button ${active ? "active" : ""}`} onClick={onClick}><span aria-hidden="true">{icon}</span>{children}</button>;
 }
 
 function StoreUpdateNotice({ changes, onRefresh }: { changes: RevisionChange[]; onRefresh(): void }) {
@@ -437,6 +441,8 @@ export function TopicWorkspace({ api, topic, path, active = true, refreshRevisio
   const [conflict, setConflict] = useState<any>();
   const [showMetadata, setShowMetadata] = useState(false);
   const [showNewFile, setShowNewFile] = useState(false);
+  const [showWorkArea, setShowWorkArea] = useState(false);
+  const [showTasks, setShowTasks] = useState(false);
   const [showCatalogue, setShowCatalogue] = useState(false);
   const [showAllFiles, setShowAllFiles] = useState(false);
   const [showAllHistory, setShowAllHistory] = useState(false);
@@ -528,12 +534,13 @@ export function TopicWorkspace({ api, topic, path, active = true, refreshRevisio
       <section className="document-pane">
         <PageHeader eyebrow={<button className="text-button" onClick={onBack}>← Topics</button>} title={metadata.title} subtitle={metadata.summary} actions={<><button aria-haspopup="dialog" onClick={() => setShowAllFiles(true)}>Files</button><button aria-haspopup="dialog" onClick={() => setShowAllHistory(true)}>Change history</button><button onClick={() => setShowMetadata(true)}>Edit details</button><button className={editing ? "" : "primary"} onClick={() => setEditing((value) => !value)}>{editing ? "Read" : "Edit"}</button></>} />
         {notice && <div className={`notice ${notice.kind}`}>{notice.text}</div>}
+        <div className="workflow-actions"><button aria-haspopup="dialog" disabled={dirty} title={dirty ? "Save your draft before creating linked work" : undefined} onClick={() => setShowWorkArea(true)}>New issue, plan, or draft</button><button aria-haspopup="dialog" onClick={() => setShowTasks(true)}>Tasks in this area</button>{path !== "context.md" && <button onClick={() => onOpenDocument(topic, "context.md", metadata.title)}>Topic context</button>}</div>
         {editing ? (
           <div className="edit-layout">
             <div><div className="section-label">Markdown source</div><MarkdownEditor value={draft} onChange={setDraft} onScrollRatio={(ratio) => { const node = preview.current; if (node) node.scrollTop = ratio * Math.max(0, node.scrollHeight - node.clientHeight); }} /></div>
             <div><div className="section-label live-preview-label"><span>Live safe preview</span><small aria-live="polite">{draft.length.toLocaleString()} characters</small></div><div className="preview-scroll" ref={preview}><MarkdownView>{draft}</MarkdownView></div></div>
           </div>
-        ) : <MarkdownView>{file.content}</MarkdownView>}
+        ) : <MarkdownView currentPath={path} onOpenFile={(filePath) => onOpenDocument(topic, filePath, metadata.title)}>{file.content}</MarkdownView>}
         {editing && <div className="save-bar"><input aria-label="Change description" placeholder="Describe this change for the audit history" value={description} onChange={(event) => setDescription(event.target.value)} /><span>{dirty ? "Unsaved changes" : "No changes"}</span><button onClick={() => { setDraft(file.content); setEditing(false); }}>Cancel</button><button className="primary" disabled={!dirty} onClick={save}>Save safely</button></div>}
       </section>
       {showContext && <aside className="context-pane" aria-label="Topic sidebar">
@@ -559,6 +566,8 @@ export function TopicWorkspace({ api, topic, path, active = true, refreshRevisio
       {showMetadata && <MetadataDialog api={api} topic={topic} metadata={metadata} expectedHash={contextHash} onClose={() => setShowMetadata(false)} onSaved={() => { setShowMetadata(false); setRevision((value) => value + 1); onChanged(); }} />}
       {showNewFile && <NewFileDialog api={api} topic={topic} onClose={() => setShowNewFile(false)} onCreated={(createdPath: string) => { setShowNewFile(false); setRevision((value) => value + 1); onOpenDocument(topic, createdPath, metadata.title); onChanged(); }} />}
       {showCatalogue && <CatalogueInspector api={api} topic={topic} onClose={() => setShowCatalogue(false)} />}
+      {showWorkArea && <Dialog title="Create linked work" onClose={() => setShowWorkArea(false)}><WorkAreaForm api={api} topic={topic} parentFile={path} onCreated={(createdPath) => { setShowWorkArea(false); setRevision((value) => value + 1); onOpenDocument(topic, createdPath, metadata.title); onChanged(); }} /></Dialog>}
+      {showTasks && <Dialog title="Work-area tasks" onClose={() => setShowTasks(false)} wide><TasksView api={api} initialTopic={topic} initialPath={path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : ""} onOpen={(selectedTopic, selectedPath, title) => { setShowTasks(false); onOpenDocument(selectedTopic, selectedPath, title); }} onChanged={() => { setRevision((value) => value + 1); onChanged(); }} /></Dialog>}
       {showAllFiles && <FileBrowserDialog api={api} topic={topic} title={metadata.title} initialSort={fileSort} currentPath={path} onOpen={onOpenDocument} onClose={() => setShowAllFiles(false)} />}
       {showAllHistory && <HistoryBrowserDialog api={api} topic={topic} onOpenFile={onOpenDocument} onClose={() => setShowAllHistory(false)} />}
       {pendingDelete === "file" && <ReasonDialog title={`Move ${path} to trash?`} detail="The file remains recoverable in Topical trash." action="Move file to trash" onClose={() => setPendingDelete(undefined)} onSubmit={deleteFile} />}
@@ -603,9 +612,10 @@ export function markdownPathForName(name: string) {
 }
 
 function CreateTopic({ api, onClose, onCreated }: any) {
+  const [template, setTemplate] = useState("");
   const [title, setTitle] = useState(""); const [summary, setSummary] = useState(""); const [tagText, setTagText] = useState(""); const [content, setContent] = useState(""); const [description, setDescription] = useState(""); const [error, setError] = useState<string>();
-  const submit = async (event: FormEvent) => { event.preventDefault(); try { const result = await api.send("POST", "/topics", { title, summary, tags: tagText.split(",").map((item) => item.trim()).filter(Boolean), initialContent: content, description }); onCreated(result.topic); } catch (reason) { setError(errorMessage(reason)); } };
-  return <Dialog title="Create topic" onClose={onClose}><form className="form-stack" onSubmit={submit}><label>Title<input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} required /></label><label>Summary<textarea value={summary} onChange={(event) => setSummary(event.target.value)} /></label><label>Tags<input placeholder="optional, sparse, recurring" value={tagText} onChange={(event) => setTagText(event.target.value)} /></label><label>Initial Markdown<textarea rows={8} value={content} onChange={(event) => setContent(event.target.value)} /></label><label>Change description<input value={description} onChange={(event) => setDescription(event.target.value)} required minLength={3} /></label>{error && <InlineError text={error} />}<div className="dialog-actions"><button type="button" onClick={onClose}>Cancel</button><button className="primary">Create topic</button></div></form></Dialog>;
+  const submit = async (event: FormEvent) => { event.preventDefault(); try { const result = await api.send("POST", "/topics", { title, summary, tags: tagText.split(",").map((item) => item.trim()).filter(Boolean), initialContent: template ? "" : content, ...(template ? { template } : {}), description }); onCreated(result.topic); } catch (reason) { setError(errorMessage(reason)); } };
+  return <Dialog title="Create topic" onClose={onClose}><form className="form-stack" onSubmit={submit}><label>Title<input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} required /></label><label>Summary<textarea value={summary} onChange={(event) => setSummary(event.target.value)} /></label><label>Starting structure<select value={template} onChange={(event) => setTemplate(event.target.value)}><option value="">Custom Markdown</option><option value="oncall">On-call</option><option value="project">Project</option><option value="documentation">Documentation</option><option value="planning">Planning</option></select></label>{template && <p>Starts with purpose, current status, active work, next actions, and decisions. Add issues, plans, and drafts as needed.</p>}<label>Tags<input placeholder="optional, sparse, recurring" value={tagText} onChange={(event) => setTagText(event.target.value)} /></label>{!template && <label>Initial Markdown<textarea rows={8} value={content} onChange={(event) => setContent(event.target.value)} /></label>}<label>Change description<input value={description} onChange={(event) => setDescription(event.target.value)} required minLength={3} /></label>{error && <InlineError text={error} />}<div className="dialog-actions"><button type="button" onClick={onClose}>Cancel</button><button className="primary">Create topic</button></div></form></Dialog>;
 }
 
 export function SearchView({ api, onOpen, onTagClick, request, liveRevision }: { api: ApiClient; onOpen(topic: string, path?: string, title?: string): void; onTagClick(tag: string): void; request: { query: string; key: number }; liveRevision: number }) {

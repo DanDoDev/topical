@@ -1,9 +1,20 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { MarkdownView } from "./MarkdownView";
+import { MarkdownView, resolveTopicLink } from "./MarkdownView";
+
+afterEach(cleanup);
 
 describe("MarkdownView", () => {
+  it("opens relative Markdown links within the topic and hides task metadata", () => {
+    const onOpenFile = vi.fn();
+    const { container } = render(<MarkdownView currentPath="issues/a/context.md" onOpenFile={onOpenFile}>{"<!-- topical:tasks off -->\n\n[Runbook](drafts/runbook.md)"}</MarkdownView>);
+    fireEvent.click(screen.getByRole("link", { name: "Runbook" }));
+    expect(onOpenFile).toHaveBeenCalledWith("issues/a/drafts/runbook.md");
+    expect(container).not.toHaveTextContent("topical:tasks");
+    expect(resolveTopicLink("../../context.md", "issues/a/context.md")).toBe("context.md");
+    for (const href of ["../../../secret.md", "https://example.com/a.md", "//example.com/a.md", "%2fetc/a.md", "javascript:alert(1)"]) expect(resolveTopicLink(href, "issues/a/context.md")).toBeNull();
+  });
   it("renders useful Markdown while leaving embedded HTML inert", () => {
     const { container } = render(<MarkdownView>{"# Safe\n\n- [x] done\n\n<script>alert(1)</script>"}</MarkdownView>);
     expect(screen.getByRole("heading", { name: "Safe" })).toBeInTheDocument();

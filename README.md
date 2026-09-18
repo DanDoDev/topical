@@ -1,5 +1,7 @@
 # Topical MCP
 
+See [Workflows and tasks](docs/workflows-and-tasks.md) for on-call/project starters, linked issue/plan/draft creation, and indexed Markdown TODOs across topics.
+
 [![CI](https://github.com/DanDoDev/topical/actions/workflows/ci.yml/badge.svg)](https://github.com/DanDoDev/topical/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 

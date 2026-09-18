@@ -52,6 +52,7 @@ const SERVER_INSTRUCTIONS = [
   "Do not infer a topic from a similarly named Codex project; ask only if search and list cannot identify a single likely topic.",
   "Treat context.md as a concise routing document: purpose, current status, immediate decisions, and links to focused supporting files.",
   "Put substantial plans, research, logs, and handoffs in focused topic files; update context.md with only a concise status or link.",
+  "Use list_tasks for outstanding actions across topics rather than reading every file. Store actions once in their owning work area; handoffs link to them. Use create_work_area for an issue, plan, or draft, and keep detailed evidence in supporting files. Drafts exclude procedural checklists from actionable tasks; keep drafting actions in the parent context.",
   "Publication guidance is read-only; only explicit publish_document or update_publication calls can change a published file."
 ].join(" ");
 const description = z.string().min(3).max(500).describe("One sentence explaining this change; recorded in the topic history.");
@@ -62,6 +63,25 @@ export async function startServer({ application, transport } = {}) {
   const app = application || new TopicalApplication(await loadTopicalConfig());
   await app.initialize();
   const server = new McpServer({ name: "topical", version: TOPICAL_VERSION }, { instructions: SERVER_INSTRUCTIONS });
+
+  server.registerTool("list_tasks", {
+    title: "List tasks",
+    description: "Query indexed Markdown tasks globally, by topic, or by work-area path. Returns bounded tasks, scoped counts, source hashes and checkbox offsets. External edits require reindex. Follow cursors; read only the owning context needed for the selected task.",
+    inputSchema: { topic: optionalTopicId, pathPrefix: z.string().max(1000).optional(), status: z.enum(["open", "completed", "all"]).optional(), cursor, limit: z.number().int().min(1).max(100).optional() },
+    annotations: { readOnlyHint: true }
+  }, tool((input) => app.listTasks(input)));
+
+  server.registerTool("set_task_completed", {
+    title: "Complete or reopen task",
+    description: "Update the original Markdown checkbox using its indexed offset and sourceHash as expectedHash. On conflict refresh and review before retrying; no separate task store is authoritative.",
+    inputSchema: { topic: topicId, filePath: topicFilePath, offset: z.number().int().min(0), completed: z.boolean(), expectedHash: contentHash, description }
+  }, tool((input) => app.setTaskCompleted(input)));
+
+  server.registerTool("create_work_area", {
+    title: "Create issue, plan, or draft",
+    description: "Create a focused issue or plan context, or a draft file, beneath the reviewed parent file's folder and link it from that parent. Search/read first to avoid duplicates. Retry safely with the same inputs after inspecting partial work; existing content is never overwritten.",
+    inputSchema: { topic: topicId, kind: z.enum(["issue", "plan", "draft"]), slug: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(100), title: topicTitle, brief: z.string().max(4000).optional(), parentFile: optionalTopicFilePath, expectedHash: contentHash, description }
+  }, tool((input) => app.createWorkArea(input)));
 
   server.registerTool("search_topics", {
     title: "Search topics",
@@ -132,6 +152,7 @@ export async function startServer({ application, transport } = {}) {
       summary: z.string().max(500).default(""),
       tags: optionalTags,
       initialContent: z.string().optional(),
+      template: z.enum(["oncall", "project", "documentation", "planning"]).optional(),
       description
     }
   }, tool((input) => app.createTopic(input)));
