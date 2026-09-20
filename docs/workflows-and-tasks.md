@@ -41,3 +41,7 @@ Pagination is offset-based within a stable sort, not a snapshot. Restart paging 
 Task rows live in the existing disposable `.topical-cache/search.sqlite`. Normal writes replace only the changed file's tasks in the same transaction as its search records. Deletion removes them, restoration recreates them, and cache rebuild reconstructs them from Markdown. Queries do not reopen source files or rewrite the cache.
 
 Direct external edits require **System → Reindex** or `reindex_topical`. Refresh reloads the current index, without scanning files. Index freshness is not an individual task's modification time. Priority, due dates, owners, recurrence, dependencies, and permanent task IDs are not interpreted in this version.
+
+## Organize existing work
+
+Use **Organize context** to preview and apply section extractions into linked supporting files. Tasks move with their owning material. See [reviewed context reorganization](context-reorganization.md) for preservation, conflict, and recovery behavior.

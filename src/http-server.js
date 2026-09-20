@@ -115,7 +115,7 @@ export function createHttpServer({ application, csrfToken = randomBytes(32).toSt
     version: TOPICAL_VERSION,
     csrfToken,
     ...(await application.getRevision()),
-    capabilities: ["topics", "search", "tasks", "workflows", "editing", "taxonomy", "history", "paged-history", "trash", "publications", "health", "reindex", "manual-refresh", "change-notifications", "catalogue-inspection", "context-analysis"]
+    capabilities: ["topics", "search", "tasks", "workflows", "editing", "taxonomy", "history", "paged-history", "trash", "publications", "health", "reindex", "manual-refresh", "change-notifications", "catalogue-inspection", "context-analysis", "context-reorganization"]
   }));
   server.get("/api/v1/revision", endpoint(z.object({ topic: topic.optional() }), (request) => request.query, (input) => application.getRevision(input)));
   server.get("/api/v1/topics", endpoint(topicListQuery, (request) => request.query, (input) => application.listTopics(input)));
@@ -130,7 +130,10 @@ export function createHttpServer({ application, csrfToken = randomBytes(32).toSt
     fileLimit: limit(100, 20),
     fileSort: z.enum(["recent", "name", "size"]).default("recent")
   }), (request) => ({ ...request.params, ...request.query }), (input) => application.getTopicOverview(input)));
-  server.get("/api/v1/topics/:topic/context-analysis", endpoint(z.object({ topic }), (request) => request.params, (input) => application.analyzeTopicContext(input)));
+  const reorganizationSchema = z.object({ topic, filePath: filePath.default("context.md"), expectedHash: hash, extractions: z.array(z.object({ start: z.number().int().min(0), destination: filePath })).min(1).max(20) });
+  server.post("/api/v1/reorganization/preview", endpoint(reorganizationSchema, (request) => request.body, (input) => application.previewTopicReorganization(input)));
+  server.post("/api/v1/reorganization/apply", endpoint(reorganizationSchema.extend({ previewHash: hash, description }), (request) => request.body, (input) => application.applyTopicReorganization(input)));
+  server.get("/api/v1/topics/:topic/context-analysis", endpoint(z.object({ topic, filePath: filePath.optional() }), (request) => ({ ...request.params, filePath: request.query.filePath }), (input) => application.analyzeTopicContext(input)));
   server.get("/api/v1/topic-files", endpoint(z.object({
     topic,
     query: z.string().max(2000).default(""),

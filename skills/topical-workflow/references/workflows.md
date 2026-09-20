@@ -34,4 +34,4 @@ Suggested states are working, blocked, ready for review, and complete. Completin
 
 Update current status, decisions, and remaining actions in the owning work area. Root context needs only a concise summary or link change. Prefer current status over accumulating contradictory dated status paragraphs.
 
-If existing context needs restructuring, propose concrete extractions and link changes. Preserve source material in supporting files before shortening the original, using reviewed hashes. Automatic cleanup tooling is separate from creation workflows.
+If existing context needs restructuring, propose concrete extractions and link changes. Preserve source material in supporting files before shortening the original, using reviewed hashes. Use the [reviewed reorganization workflow](reorganization.md) for requested cleanup. Creating work alone does not authorize reorganizing existing material.

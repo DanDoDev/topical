@@ -229,3 +229,20 @@ test("bundled static serving does not expose files outside ui-dist", async (t) =
   assert.match(missingAsset.headers["content-type"], /^text\/plain/);
   assert.doesNotMatch(missingAsset.body, /<html|<script/i);
 });
+
+test("HTTP reorganization previews and applies reviewed inputs with conflict and CSRF protection", async (t) => {
+  const { server, application } = await createServer();
+  t.after(async () => { await server.close(); await application.close(); });
+  const { topic } = await application.createTopic({ title: "Cleanup fixture", initialContent: "# Cleanup\n\n## Evidence\n\n- [ ] Check trace\n", description: "Created cleanup fixture." });
+  const analysis = (await server.inject({ method: "GET", url: `/api/v1/topics/${topic}/context-analysis`, headers: { host } })).json();
+  const input = { topic, expectedHash: analysis.context.hash, extractions: [{ start: analysis.sections[0].start, destination: "research/evidence.md" }] };
+  const request = (url, payload) => server.inject({ method: "POST", url: `/api/v1/reorganization/${url}`, headers: headers({ "content-type": "application/json" }), payload });
+  const preview = await request("preview", input);
+  assert.equal(preview.statusCode, 200, preview.body);
+  const payload = { ...input, previewHash: preview.json().previewHash, description: "Extracted reviewed evidence." };
+  const denied = await server.inject({ method: "POST", url: "/api/v1/reorganization/apply", headers: { host, origin, "content-type": "application/json" }, payload });
+  assert.equal(denied.statusCode, 403);
+  assert.equal((await request("apply", payload)).statusCode, 200);
+  assert.equal((await request("apply", payload)).statusCode, 409);
+  assert.equal((await application.listTasks({ topic })).tasks[0].path, "research/evidence.md");
+});

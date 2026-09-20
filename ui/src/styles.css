@@ -379,3 +379,6 @@ button.table-row:hover, .table-row.selected { padding-right: .7rem; padding-left
 .tasks-freshness { font-size: .85rem; opacity: .7; }
 .workflow-parent-preview { max-height: 240px; overflow: auto; white-space: pre-wrap; }
 @media (max-width: 600px) { .task-row { flex-wrap: wrap; } .task-row > button { margin-left: 30px; } }
+
+.form-stack label.reorganization-section { display: flex; align-items: center; gap: .6rem; }
+.form-stack label.reorganization-section input { width: auto; flex: 0 0 auto; }

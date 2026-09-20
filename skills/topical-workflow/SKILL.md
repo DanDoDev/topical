@@ -36,7 +36,7 @@ Treat `context.md` as a routing document, not an append-only transcript. It shou
 4. Create a focused supporting file when work enters a distinct phase or would turn `context.md` into a large mixed-purpose dump. Substantial plans, research, implementation logs, dated observations, and handoffs belong there.
 5. Update `context.md` only with a concise status change or link to the focused file.
 6. Use `analyze_topic_context` for advisory size, structure, and broken-link findings. Its findings do not authorize automatic edits.
-7. Never silently delete, summarize away, or relocate the only copy of source material. Any future optimization must create or update supporting files first, then shorten `context.md` only after explicit review with current hashes.
+7. Never silently delete, summarize away, or relocate the only copy of source material. For requested cleanup, read [references/reorganization.md](references/reorganization.md): analyze, preview concrete section extractions, and apply the reviewed plan with current hashes. Existing user authorization may cover applying the concrete reviewed changes; advisory findings alone do not authorize cleanup.
 
 The normal `context.md` body target is approximately 2,000–4,000 characters. This is advisory: existing large topics remain valid and writes are not rejected solely for exceeding it.
 

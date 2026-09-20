@@ -193,6 +193,7 @@ Keep `context.md` concise: purpose, current status, immediate decisions or quest
 - `create_topic`, `read_topic_file`, and `update_topic_file` manage core context.
 - `get_topic_overview` returns selectable, bounded context, file, history, and publication fields before an agent reads detailed notes.
 - `analyze_topic_context` reports advisory context size, section-sprawl, dated-heading, and broken-link findings without writing.
+- `preview_topic_reorganization` and `apply_topic_reorganization` extract reviewed sections into linked supporting files. The local UI offers **Organize context**; see [reviewed context reorganization](docs/context-reorganization.md).
 - `create_topic_file` and `delete_topic_file` manage supporting Markdown files.
 - `update_topic_metadata` edits frontmatter safely.
 - `delete_topic` moves a topic to recoverable `.trash` storage instead of permanently deleting it; `list_trash` and `restore_trash` provide explicit recovery.
@@ -215,7 +216,7 @@ All mutation tools require a one-sentence `description`. It is recorded in the r
 | `create_topic` | `title`, `summary`, `tags`, `initialContent`, `description` | Topic ID and `context.md` path. |
 | `read_topic_file` | `topic`, optional `filePath` | Markdown content and a SHA-256 `hash`. |
 | `get_topic_overview` | `topic`, optional `include`, context/file bounds and cursor | Selectable bounded briefing fields; full Markdown remains an explicit file read. |
-| `analyze_topic_context` | `topic` | Read-only advisory analysis; never reorganizes topic content. |
+| `analyze_topic_context` | `topic`, optional `filePath` | Read-only advisory analysis; never reorganizes topic content. |
 | `update_topic_file` | `topic`, `filePath`, `mode`, `content`, optional `section`, `expectedHash`, `description` | Updated file path and hash. |
 | `create_topic_file` | `topic`, `filePath`, `content`, `description` | New supporting Markdown file and hash. |
 | `delete_topic_file` | `topic`, `filePath`, `expectedHash`, `confirm: true`, `description` | Recoverable trash entry. |

@@ -29,7 +29,7 @@ test("MCP server registers and calls Topical tools over stdio", async (t) => {
   const tools = await client.listTools();
   assert.deepEqual(
     tools.tools.map((tool) => tool.name).sort(),
-    ["analyze_topic_context", "create_topic", "create_topic_file", "create_work_area", "delete_topic", "delete_topic_file", "forget_publication", "get_publication_status", "get_system_health", "get_topic_overview", "list_history", "list_publications", "list_tags", "list_tasks", "set_task_completed", "list_topic_files", "list_topics", "list_trash", "publish_document", "read_publication", "read_topic_file", "reindex_topical", "restore_trash", "search_topic_files", "search_topics", "update_publication", "update_topic_file", "update_topic_metadata"].sort(),
+    ["apply_topic_reorganization", "preview_topic_reorganization", "analyze_topic_context", "create_topic", "create_topic_file", "create_work_area", "delete_topic", "delete_topic_file", "forget_publication", "get_publication_status", "get_system_health", "get_topic_overview", "list_history", "list_publications", "list_tags", "list_tasks", "set_task_completed", "list_topic_files", "list_topics", "list_trash", "publish_document", "read_publication", "read_topic_file", "reindex_topical", "restore_trash", "search_topic_files", "search_topics", "update_publication", "update_topic_file", "update_topic_metadata"].sort(),
     stderr.join("")
   );
   const createTopicTool = tools.tools.find((tool) => tool.name === "create_topic");
@@ -61,7 +61,7 @@ test("MCP server registers and calls Topical tools over stdio", async (t) => {
     name: "update_topic_file",
     arguments: {
       topic: "mcp-verification",
-      content: "# Notes\n\nThe MCP round trip works.",
+      content: "## Notes\n\nThe MCP round trip works.",
       expectedHash: readBody.hash,
       description: "Recorded the successful MCP round trip."
     }
@@ -175,6 +175,15 @@ test("MCP server registers and calls Topical tools over stdio", async (t) => {
   });
   assert.equal(restoredTopic.isError, false, JSON.stringify(restoredTopic));
 
+  const cleanupSource = JSON.parse((await client.callTool({ name: "read_topic_file", arguments: { topic: "mcp-verification" } })).content[0].text);
+  const cleanupAnalysis = JSON.parse((await client.callTool({ name: "analyze_topic_context", arguments: { topic: "mcp-verification" } })).content[0].text);
+  assert.ok(cleanupAnalysis.sections.length);
+  const cleanupInput = { topic: "mcp-verification", expectedHash: cleanupSource.hash, extractions: [{ start: cleanupAnalysis.sections[0].start, destination: "notes/extracted.md" }] };
+  const cleanupPreview = JSON.parse((await client.callTool({ name: "preview_topic_reorganization", arguments: cleanupInput })).content[0].text);
+  assert.ok(cleanupPreview.previewHash);
+  const cleanupApplied = await client.callTool({ name: "apply_topic_reorganization", arguments: { ...cleanupInput, previewHash: cleanupPreview.previewHash, description: "Preserved a reviewed section." } });
+  assert.equal(cleanupApplied.isError, false, JSON.stringify(cleanupApplied));
+  metadataBody.hash = JSON.parse(cleanupApplied.content[0].text).hash;
   const workflow = await client.callTool({ name: "create_work_area", arguments: { topic: "mcp-verification", kind: "issue", slug: "protocol-followup", title: "Protocol follow-up", brief: "- [ ] Review trace", expectedHash: metadataBody.hash, description: "Created a protocol follow-up." } });
   assert.equal(workflow.isError, false, JSON.stringify(workflow));
   const tasks = JSON.parse((await client.callTool({ name: "list_tasks", arguments: { topic: "mcp-verification" } })).content[0].text);

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { link, lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -24,6 +24,7 @@ import {
 import { paginate } from "./pagination.js";
 import { queryWithRelaxedFallback } from "./search-index.js";
 import { SqliteSearchIndex } from "./sqlite-search-index.js";
+import { buildReorganization, contextSections, localMarkdownLinks } from "./reorganization.js";
 import { extractTasks } from "./tasks.js";
 import { topicStarter, workStarter, workPath, linkWork } from "./workflows.js";
 
@@ -281,16 +282,6 @@ function sortedTopicDocuments(documents, sort = "recent") {
   });
 }
 
-function localMarkdownLinks(markdown) {
-  const links = [];
-  for (const match of String(markdown || "").matchAll(/\[[^\]]*\]\(([^)]+)\)/g)) {
-    const raw = match[1].trim().replace(/^<|>$/g, "");
-    if (!raw || raw.startsWith("#") || /^[a-z][a-z0-9+.-]*:/i.test(raw)) continue;
-    const target = raw.split("#")[0].split("?")[0];
-    if (target.toLowerCase().endsWith(".md")) links.push(target);
-  }
-  return [...new Set(links)];
-}
 
 export class TopicalStore {
   #queue = Promise.resolve();
@@ -1062,6 +1053,74 @@ export class TopicalStore {
     });
   }
 
+  async previewTopicReorganization({ topic, filePath = "context.md", expectedHash, extractions }) {
+    const source = await this.readTopicFile({ topic, filePath });
+    assertExpectedHash(expectedHash, source.hash, { topic, path: source.path });
+    if (!Array.isArray(extractions)) throw new TopicalError("Section extractions are required.");
+    const normalized = extractions.map((item) => ({ start: item.start, destination: assertMarkdownPath(item.destination, { allowContext: false }) }));
+    const directory = await this.#requireTopicDirectory(topic);
+    for (const item of normalized) {
+      if (item.destination === source.path || item.destination.split("/").some((part) => part.startsWith("."))) throw new TopicalError("Choose a visible supporting file distinct from the source.");
+      await assertSafeFilesystemPath(this.root, path.join(directory, item.destination));
+    }
+    const plan = buildReorganization({ topic, source, extractions: normalized });
+    assertMarkdown(plan.source.after);
+    for (const file of plan.files) {
+      assertMarkdown(file.content);
+      const target = path.join(directory, file.path);
+      if (await exists(target) && await readFile(target, "utf8") !== file.content) throw conflictError("A destination already exists with different content. Choose a new path.", { topic, path: file.path });
+    }
+    return plan;
+  }
+
+  async applyTopicReorganization({ topic, filePath = "context.md", expectedHash, extractions, previewHash, description }) {
+    return this.#serial(async () => {
+      assertDescription(description);
+      const plan = await this.previewTopicReorganization({ topic, filePath, expectedHash, extractions });
+      assertExpectedHash(previewHash, plan.previewHash, { topic, path: plan.source.path, field: "previewHash" });
+      const directory = await this.#requireTopicDirectory(topic);
+      const preserved = [];
+      let sourceWritten = false;
+      try {
+        for (const file of plan.files) {
+          const target = path.join(directory, file.path);
+          await assertSafeFilesystemPath(this.root, target);
+          await mkdir(path.dirname(target), { recursive: true });
+          await assertSafeFilesystemPath(this.root, target);
+          // Exclusive creation never clobbers an external writer's destination.
+          const temporary = `${target}.${randomUUID()}.tmp`;
+          try {
+            await writeFile(temporary, file.content, { encoding: "utf8", flag: "wx" });
+            try { await link(temporary, target); }
+            catch (error) {
+              if (error.code !== "EEXIST" || await readFile(target, "utf8") !== file.content) throw error;
+            }
+          } finally { await rm(temporary, { force: true }); }
+          preserved.push(file.path);
+          const { change } = await this.#record(topic, "create_file", file.path, description);
+          await this.#upsertTopicInRoot(topic, change);
+          await this.#applySearchChange(change);
+        }
+        // Preserve first; verify all copies and the original before shortening it.
+        for (const file of plan.files) {
+          const current = await this.readTopicFile({ topic, filePath: file.path });
+          assertExpectedHash(file.hash, current.hash, { topic, path: file.path });
+        }
+        const current = await this.readTopicFile({ topic, filePath: plan.source.path });
+        assertExpectedHash(expectedHash, current.hash, { topic, path: current.path });
+        await writeAtomic(this.root, path.join(directory, current.path), plan.source.after);
+        sourceWritten = true;
+        // Keep metadata byte-for-byte so apply writes exactly the reviewed preview.
+        const { change } = await this.#record(topic, "update_file", current.path, description);
+        await this.#upsertTopicInRoot(topic, change);
+        await this.#applySearchChange(change);
+        return { topic, path: current.path, hash: hash(plan.source.after), preserved, sourceWritten };
+      } catch (error) {
+        throw new TopicalError("Reorganization did not finish. Read the source and preserved files before retrying; reindex if the source was already written.", { code: "PARTIAL_REORGANIZATION", details: { topic, path: plan.source.path, preserved, sourceWritten, cause: error.message } });
+      }
+    });
+  }
+
   async setTaskCompleted({ topic, filePath, offset, completed, expectedHash, description }) {
     if (!Number.isInteger(offset) || offset < 0 || typeof completed !== "boolean") throw new TopicalError("A valid task offset and completion state are required.");
     const current = await this.readTopicFile({ topic, filePath });
@@ -1358,27 +1417,31 @@ export class TopicalStore {
     return result;
   }
 
-  async analyzeTopicContext({ topic }) {
+  async analyzeTopicContext({ topic, filePath = "context.md" }) {
     assertTopicId(topic);
-    const context = await this.readTopicFile({ topic, filePath: "context.md" });
+    const context = await this.readTopicFile({ topic, filePath });
     const body = parseFrontmatter(context.content).body;
     const index = await this.#topicIndex(topic);
     const knownPaths = new Set((index.documents || []).map((document) => document.path));
     const links = localMarkdownLinks(body);
     const brokenLinks = links.filter((target) => {
-      const normalized = path.posix.normalize(target);
+      const normalized = path.posix.normalize(path.posix.join(path.posix.dirname(context.path), target));
       return normalized.startsWith("../") || !knownPaths.has(normalized);
     });
     const headings = body.split(/\r?\n/).filter((line) => /^#{1,6}\s+\S/.test(line));
     const datedHeadings = headings.filter((heading) => /\b(?:19|20)\d{2}\b|\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/i.test(heading));
     const characters = body.length;
+    const sections = contextSections(context.content);
     const findings = [];
-    if (characters > CONTEXT_ADVISORY_CHARS) findings.push({ code: "ABOVE_CONTEXT_BUDGET", severity: "advisory", message: `context.md has ${characters.toLocaleString()} body characters; the normal routing-document target is at most ${CONTEXT_ADVISORY_CHARS.toLocaleString()}.` });
-    if (headings.length > 12) findings.push({ code: "MANY_SECTIONS", severity: "advisory", message: `context.md has ${headings.length} headings and may mix long-lived routing with detailed work logs.` });
+    if (characters > CONTEXT_ADVISORY_CHARS) findings.push({ code: "ABOVE_CONTEXT_BUDGET", severity: "advisory", message: `${context.path} has ${characters.toLocaleString()} body characters; the normal routing-document target is at most ${CONTEXT_ADVISORY_CHARS.toLocaleString()}.` });
+    if (headings.length > 12) findings.push({ code: "MANY_SECTIONS", severity: "advisory", message: `${context.path} has ${headings.length} headings and may mix long-lived routing with detailed work logs.` });
     if (datedHeadings.length > 3) findings.push({ code: "DATED_LOG_SECTIONS", severity: "advisory", message: `${datedHeadings.length} dated headings may be better preserved in a focused implementation or handoff file.` });
     if (brokenLinks.length) findings.push({ code: "BROKEN_TOPIC_LINKS", severity: "advisory", message: `${brokenLinks.length} local Markdown link${brokenLinks.length === 1 ? "" : "s"} do not resolve to a current topic file.` });
     return {
       topic,
+      path: context.path,
+      sections: sections.slice(0, 100),
+      sectionsTruncated: sections.length > 100,
       mode: "analyze_only",
       changed: false,
       context: {

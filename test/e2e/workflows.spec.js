@@ -45,3 +45,29 @@ test("create on-call work, draft a document, and complete a global follow-up", a
   await page.getByRole("article").getByRole("link", { name: "Recovery runbook" }).click();
   await expect(page.getByRole("heading", { name: "Recovery runbook", exact: true })).toBeVisible();
 });
+
+test("preview and apply context extraction with a single task owner", async ({ page }) => {
+  await page.goto("/");
+  const topic = await page.evaluate(async () => {
+    const { csrfToken } = await (await fetch("/api/v1/bootstrap")).json();
+    const response = await fetch("/api/v1/topics", { method: "POST", headers: { "Content-Type": "application/json", "X-Topical-CSRF": csrfToken }, body: JSON.stringify({ title: "Comet Cleanup", initialContent: "# Comet Cleanup\n\n## Current\n\nInvestigating.\n\n## Investigation\n\nCollected the fictional trace.\n\n- [ ] Review the comet trace\n", description: "Created a cleanup fixture." }) });
+    return (await response.json()).topic;
+  });
+  await page.reload();
+  await page.getByRole("button", { name: /Comet Cleanup/ }).first().click();
+  await page.getByRole("button", { name: "Organize context", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Organize context" });
+  await dialog.getByRole("checkbox", { name: /Investigation/ }).check();
+  await dialog.getByLabel("Destination for Investigation").fill("research/trace.md");
+  await dialog.getByRole("button", { name: "Preview changes" }).click();
+  await expect(dialog.getByRole("region", { name: "Reorganization preview" })).toContainText("Collected the fictional trace.");
+  await dialog.getByLabel("Change description").fill("Preserved reviewed investigation evidence.");
+  await page.screenshot({ path: "test-results/context-reorganization.png", fullPage: true });
+  await dialog.getByRole("button", { name: "Apply reviewed changes" }).click();
+  await expect(dialog).toHaveCount(0);
+  await page.getByRole("article").getByRole("link", { name: "Read supporting file" }).click();
+  await expect(page.getByRole("article")).toContainText("Collected the fictional trace.");
+  await page.getByRole("button", { name: "Tasks", exact: true }).click();
+  await page.getByRole("combobox", { name: "Topic", exact: true }).selectOption(topic);
+  await expect(page.getByRole("checkbox", { name: "Complete: Review the comet trace" })).toHaveCount(1);
+});

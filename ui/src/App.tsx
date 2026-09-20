@@ -5,6 +5,7 @@ import { formatEnglishDate } from "./dates";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { MarkdownView } from "./MarkdownView";
 import { TasksView } from "./TasksView";
+import { ReorganizationForm } from "./ReorganizationForm";
 import { WorkAreaForm } from "./WorkAreaForm";
 
 type View = "topics" | "search" | "tasks" | "tags" | "history" | "trash" | "publications" | "system";
@@ -441,6 +442,7 @@ export function TopicWorkspace({ api, topic, path, active = true, refreshRevisio
   const [conflict, setConflict] = useState<any>();
   const [showMetadata, setShowMetadata] = useState(false);
   const [showNewFile, setShowNewFile] = useState(false);
+  const [showReorganization, setShowReorganization] = useState(false);
   const [showWorkArea, setShowWorkArea] = useState(false);
   const [showTasks, setShowTasks] = useState(false);
   const [showCatalogue, setShowCatalogue] = useState(false);
@@ -534,7 +536,7 @@ export function TopicWorkspace({ api, topic, path, active = true, refreshRevisio
       <section className="document-pane">
         <PageHeader eyebrow={<button className="text-button" onClick={onBack}>← Topics</button>} title={metadata.title} subtitle={metadata.summary} actions={<><button aria-haspopup="dialog" onClick={() => setShowAllFiles(true)}>Files</button><button aria-haspopup="dialog" onClick={() => setShowAllHistory(true)}>Change history</button><button onClick={() => setShowMetadata(true)}>Edit details</button><button className={editing ? "" : "primary"} onClick={() => setEditing((value) => !value)}>{editing ? "Read" : "Edit"}</button></>} />
         {notice && <div className={`notice ${notice.kind}`}>{notice.text}</div>}
-        <div className="workflow-actions"><button aria-haspopup="dialog" disabled={dirty} title={dirty ? "Save your draft before creating linked work" : undefined} onClick={() => setShowWorkArea(true)}>New issue, plan, or draft</button><button aria-haspopup="dialog" onClick={() => setShowTasks(true)}>Tasks in this area</button>{path !== "context.md" && <button onClick={() => onOpenDocument(topic, "context.md", metadata.title)}>Topic context</button>}</div>
+        <div className="workflow-actions"><button aria-haspopup="dialog" disabled={dirty} title={dirty ? "Save your draft before reorganizing" : undefined} onClick={() => setShowReorganization(true)}>Organize context</button><button aria-haspopup="dialog" disabled={dirty} title={dirty ? "Save your draft before creating linked work" : undefined} onClick={() => setShowWorkArea(true)}>New issue, plan, or draft</button><button aria-haspopup="dialog" onClick={() => setShowTasks(true)}>Tasks in this area</button>{path !== "context.md" && <button onClick={() => onOpenDocument(topic, "context.md", metadata.title)}>Topic context</button>}</div>
         {editing ? (
           <div className="edit-layout">
             <div><div className="section-label">Markdown source</div><MarkdownEditor value={draft} onChange={setDraft} onScrollRatio={(ratio) => { const node = preview.current; if (node) node.scrollTop = ratio * Math.max(0, node.scrollHeight - node.clientHeight); }} /></div>
@@ -566,6 +568,7 @@ export function TopicWorkspace({ api, topic, path, active = true, refreshRevisio
       {showMetadata && <MetadataDialog api={api} topic={topic} metadata={metadata} expectedHash={contextHash} onClose={() => setShowMetadata(false)} onSaved={() => { setShowMetadata(false); setRevision((value) => value + 1); onChanged(); }} />}
       {showNewFile && <NewFileDialog api={api} topic={topic} onClose={() => setShowNewFile(false)} onCreated={(createdPath: string) => { setShowNewFile(false); setRevision((value) => value + 1); onOpenDocument(topic, createdPath, metadata.title); onChanged(); }} />}
       {showCatalogue && <CatalogueInspector api={api} topic={topic} onClose={() => setShowCatalogue(false)} />}
+      {showReorganization && <Dialog title="Organize context" onClose={() => setShowReorganization(false)} wide><ReorganizationForm api={api} topic={topic} filePath={path} onApplied={() => { setShowReorganization(false); setRevision((value) => value + 1); onChanged(); }} /></Dialog>}
       {showWorkArea && <Dialog title="Create linked work" onClose={() => setShowWorkArea(false)}><WorkAreaForm api={api} topic={topic} parentFile={path} onCreated={(createdPath) => { setShowWorkArea(false); setRevision((value) => value + 1); onOpenDocument(topic, createdPath, metadata.title); onChanged(); }} /></Dialog>}
       {showTasks && <Dialog title="Work-area tasks" onClose={() => setShowTasks(false)} wide><TasksView api={api} initialTopic={topic} initialPath={path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : ""} onOpen={(selectedTopic, selectedPath, title) => { setShowTasks(false); onOpenDocument(selectedTopic, selectedPath, title); }} onChanged={() => { setRevision((value) => value + 1); onChanged(); }} /></Dialog>}
       {showAllFiles && <FileBrowserDialog api={api} topic={topic} title={metadata.title} initialSort={fileSort} currentPath={path} onOpen={onOpenDocument} onClose={() => setShowAllFiles(false)} />}

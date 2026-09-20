@@ -52,6 +52,7 @@ const SERVER_INSTRUCTIONS = [
   "Do not infer a topic from a similarly named Codex project; ask only if search and list cannot identify a single likely topic.",
   "Treat context.md as a concise routing document: purpose, current status, immediate decisions, and links to focused supporting files.",
   "Put substantial plans, research, logs, and handoffs in focused topic files; update context.md with only a concise status or link.",
+  "For requested context cleanup, analyze_topic_context returns section offsets; preview_topic_reorganization shows exact extractions, and apply_topic_reorganization requires the reviewed previewHash. Preserve source material and review stale status explicitly; do not infer obsolete decisions from age alone.",
   "Use list_tasks for outstanding actions across topics rather than reading every file. Store actions once in their owning work area; handoffs link to them. Use create_work_area for an issue, plan, or draft, and keep detailed evidence in supporting files. Drafts exclude procedural checklists from actionable tasks; keep drafting actions in the parent context.",
   "Publication guidance is read-only; only explicit publish_document or update_publication calls can change a published file."
 ].join(" ");
@@ -82,6 +83,19 @@ export async function startServer({ application, transport } = {}) {
     description: "Create a focused issue or plan context, or a draft file, beneath the reviewed parent file's folder and link it from that parent. Search/read first to avoid duplicates. Retry safely with the same inputs after inspecting partial work; existing content is never overwritten.",
     inputSchema: { topic: topicId, kind: z.enum(["issue", "plan", "draft"]), slug: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(100), title: topicTitle, brief: z.string().max(4000).optional(), parentFile: optionalTopicFilePath, expectedHash: contentHash, description }
   }, tool((input) => app.createWorkArea(input)));
+
+  const reorganizationSchema = { topic: topicId, filePath: optionalTopicFilePath, expectedHash: contentHash, extractions: z.array(z.object({ start: z.number().int().min(0), destination: topicFilePath })).min(1).max(20) };
+  server.registerTool("preview_topic_reorganization", {
+    title: "Preview context reorganization",
+    description: "Preview extraction of selected Markdown sections into supporting files. Use section start offsets and source hash from analyze_topic_context. Destinations are relative to the topic root. Returns exact before/after, new file contents, and a previewHash. No writes; review all content before applying.",
+    inputSchema: reorganizationSchema,
+    annotations: { readOnlyHint: true }
+  }, tool((input) => app.previewTopicReorganization(input)));
+  server.registerTool("apply_topic_reorganization", {
+    title: "Apply reviewed context reorganization",
+    description: "Apply the exact reviewed extraction inputs with their expectedHash and previewHash. Preserve supporting files before shortening source. Reject stale source, altered preview, or occupied destinations. On partial failure inspect source and preserved files before retrying; never silently retry changed content.",
+    inputSchema: { ...reorganizationSchema, previewHash: contentHash, description }
+  }, tool((input) => app.applyTopicReorganization(input)));
 
   server.registerTool("search_topics", {
     title: "Search topics",
@@ -181,7 +195,7 @@ export async function startServer({ application, transport } = {}) {
   server.registerTool("analyze_topic_context", {
     title: "Analyze topic context",
     description: "Analyze context.md size, structure, and local links against the advisory thin-context contract. This is read-only and never reorganizes or deletes content.",
-    inputSchema: { topic: topicId },
+    inputSchema: { topic: topicId, filePath: optionalTopicFilePath },
     annotations: { readOnlyHint: true }
   }, tool((input) => app.analyzeTopicContext(input)));
 

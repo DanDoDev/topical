@@ -47,6 +47,8 @@ export class TopicalApplication {
   readRootCatalogue(input) { return this.store.readRootCatalogue(input); }
   readTopicCatalogue(input) { return this.store.readTopicCatalogue(input); }
   getTopicOverview(input) { return this.store.getTopicOverview(input); }
+  previewTopicReorganization(input) { return this.store.previewTopicReorganization(input); }
+  applyTopicReorganization(input) { return this.store.applyTopicReorganization(input); }
   analyzeTopicContext(input) { return this.store.analyzeTopicContext(input); }
   updateTopicFile(input) { return this.store.updateTopicFile(input); }
   createTopicFile(input) { return this.store.createTopicFile(input); }
